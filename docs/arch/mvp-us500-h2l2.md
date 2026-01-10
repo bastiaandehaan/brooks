@@ -60,3 +60,26 @@ main.py
 Omdat datasets kunnen verschillen:
 - MT5 live rates bevatten vaak een “current forming bar” (current_bar_included=True)
 - Backtest/CSV kan alleen gesloten bars bevatten (current_bar_included=False)
+# Brooks framework (planner-only) – architectuur
+
+## Waar komt dit?
+Plaats dit in: **/docs/arch/mvp-us500-h2l2.md**  
+Zet het direct onder je bestaande sectie **Dataflow** (of maak een nieuwe sectie “Planner-only dataflow”).
+
+## Dataflow (planner-only)
+main.py
+  -> Mt5Client (connect/init/shutdown)
+  -> fetch_rates(M15) -> infer_trend_m15() -> Side (LONG/SHORT)
+  -> fetch_rates(M5)
+  -> plan_next_open_trade(M5, Side, SymbolSpec, H2L2Params, ...)
+  -> apply_guardrails([candidate], Guardrails)
+  -> log ACCEPT/REJECT (geen execution)
+
+## NEXT_OPEN contract (belangrijk)
+- Signal bar = laatst gesloten bar
+- Execute = open van de eerstvolgende bar
+- Geen look-ahead: de “signal bar” moet gesloten zijn.
+
+Omdat datasets kunnen verschillen:
+- MT5 live rates bevatten vaak een “current forming bar” (current_bar_included=True)
+- Backtest/CSV kan alleen gesloten bars bevatten (current_bar_included=False)

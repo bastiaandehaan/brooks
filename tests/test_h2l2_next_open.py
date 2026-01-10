@@ -1,16 +1,10 @@
 import pandas as pd
 
-from strategies.h2l2 import Side, H2L2Params, plan_next_open_trade
+from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from utils.symbol_spec import SymbolSpec
 
 
-def _df(rows):
-    df = pd.DataFrame(rows)
-    df["ts"] = pd.to_datetime(df["ts"], utc=True)
-    return df.set_index("ts")
-
-
-def _spec():
+def _spec() -> SymbolSpec:
     return SymbolSpec(
         name="US500.cash",
         digits=2,
@@ -20,42 +14,80 @@ def _spec():
         contract_size=1.0,
         volume_min=0.01,
         volume_step=0.01,
-        volume_max=1000.0,
+        volume_max=100.0,
     )
 
 
 def test_next_open_with_current_bar_executes_on_last_index():
-    # last row represents the "current" bar (execute on its open)
-    m5 = _df([
-        {"ts": "2026-01-01T15:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100.5},
-        {"ts": "2026-01-01T15:35:00Z", "open": 100.5, "high": 100.6, "low": 98.8, "close": 99.2},
-        {"ts": "2026-01-01T15:40:00Z", "open": 99.2, "high": 100.7, "low": 99.0, "close": 100.6},
-        {"ts": "2026-01-01T15:45:00Z", "open": 100.6, "high": 100.65, "low": 98.7, "close": 99.0},
-        {"ts": "2026-01-01T15:50:00Z", "open": 99.0, "high": 100.8, "low": 98.9, "close": 100.75},
-        {"ts": "2026-01-01T15:55:00Z", "open": 100.75, "high": 101.0, "low": 100.2, "close": 100.8},  # current bar
-    ])
+    # 6 bars, waarbij de laatste de "current forming bar" kan zijn.
+    idx = pd.to_datetime(
+        [
+            "2026-01-08 15:30:00",
+            "2026-01-08 15:35:00",
+            "2026-01-08 15:40:00",
+            "2026-01-08 15:45:00",
+            "2026-01-08 15:50:00",  # signal bar (closed)
+            "2026-01-08 15:55:00",  # execute bar open
+        ],
+        utc=True,
+    )
 
-    t = plan_next_open_trade(m5, Side.LONG, _spec(), H2L2Params(min_risk_price_units=0.5), timeframe_minutes=5)
+    m5 = pd.DataFrame(
+        {
+            "open":  [100,   100.1, 100.2, 100.3, 100.4, 100.5],
+            "high":  [100.2, 100.3, 100.4, 100.5, 100.9, 101.0],
+            "low":   [99.9,  100.0, 100.1, 100.2, 100.3, 100.2],
+            "close": [100.1, 100.2, 100.3, 100.4, 100.8, 100.7],
+        },
+        index=idx,
+    )
+
+    t = plan_next_open_trade(
+        m5,
+        trend=Side.LONG,
+        spec=_spec(),
+        p=H2L2Params(pullback_bars=2, min_risk_points=0.1),
+        timeframe_minutes=5,
+    )
+
     assert t is not None
     assert t.execute_ts == m5.index[-1]
+    assert t.signal_ts == m5.index[-2]
     assert t.side == Side.LONG
 
 
 def test_next_open_closed_bars_only_executes_on_synthetic_next_bar():
-    # no current bar; last row is last CLOSED bar
-    m5 = _df([
-        {"ts": "2026-01-01T15:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100.5},
-        {"ts": "2026-01-01T15:35:00Z", "open": 100.5, "high": 100.6, "low": 98.8, "close": 99.2},
-        {"ts": "2026-01-01T15:40:00Z", "open": 99.2, "high": 100.7, "low": 99.0, "close": 100.6},
-        {"ts": "2026-01-01T15:45:00Z", "open": 100.6, "high": 100.65, "low": 98.7, "close": 99.0},
-        {"ts": "2026-01-01T15:50:00Z", "open": 99.0, "high": 100.8, "low": 98.9, "close": 100.75},  # signal bar (closed)
-    ])
+    # Alleen gesloten bars (laatste is de signal bar). We verwachten execute op +5 min.
+    idx = pd.to_datetime(
+        [
+            "2026-01-08 15:30:00",
+            "2026-01-08 15:35:00",
+            "2026-01-08 15:40:00",
+            "2026-01-08 15:45:00",
+            "2026-01-08 15:50:00",  # signal bar (closed)
+        ],
+        utc=True,
+    )
 
-    last_ts = m5.index[-1]
-    expected_exec = last_ts + pd.Timedelta(minutes=5)
+    m5 = pd.DataFrame(
+        {
+            "open":  [100,   100.1, 100.2, 100.3, 100.4],
+            "high":  [100.2, 100.3, 100.4, 100.5, 100.9],
+            "low":   [99.9,  100.0, 100.1, 100.2, 100.3],
+            "close": [100.1, 100.2, 100.3, 100.4, 100.8],
+        },
+        index=idx,
+    )
 
-    t = plan_next_open_trade(m5, Side.LONG, _spec(), H2L2Params(min_risk_price_units=0.5), timeframe_minutes=5)
+    t = plan_next_open_trade(
+        m5,
+        trend=Side.LONG,
+        spec=_spec(),
+        p=H2L2Params(pullback_bars=2, min_risk_points=0.1),
+        timeframe_minutes=5,
+    )
+
     assert t is not None
-    assert t.signal_ts == last_ts
-    assert t.execute_ts == expected_exec
+    assert t.signal_ts == m5.index[-1]
+    assert t.execute_ts == (m5.index[-1] + pd.Timedelta(minutes=5))
     assert t.side == Side.LONG
