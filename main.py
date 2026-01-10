@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import MetaTrader5 as mt5
 
@@ -22,15 +24,18 @@ logger = logging.getLogger("brooks")
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Brooks H2/L2 planner (NEXT_OPEN), no execution yet")
+
+    # Market
     p.add_argument("--symbol", default="US500.cash")
     p.add_argument("--m5-bars", type=int, default=500)
     p.add_argument("--m15-bars", type=int, default=300)
 
-    # Guardrails
+    # Guardrails (interpret session and day limits in these timezones)
     p.add_argument("--max-trades-day", type=int, default=2)
-    p.add_argument("--session-start", default="15:30")  # Europe/Brussels
-    p.add_argument("--session-end", default="21:00")    # stop new trades
-    p.add_argument("--tz", default="Europe/Brussels")
+    p.add_argument("--session-tz", default="America/New_York")
+    p.add_argument("--day-tz", default="America/New_York")
+    p.add_argument("--session-start", default="09:30")  # NY cash open
+    p.add_argument("--session-end", default="15:00")    # stop new trades earlier than close
 
     # Strategy params
     p.add_argument("--min-risk", type=float, default=1.0, help="Minimum stop distance in price units (US500 points)")
@@ -47,6 +52,15 @@ def main() -> int:
     p.add_argument("--pullback-allowance", type=float, default=2.00)
 
     args = p.parse_args()
+
+    # Time sanity (laptop time != MT5 server time; we anchor on UTC and convert)
+    now_utc = datetime.now(timezone.utc)
+    logger.info(
+        "Clock UTC=%s Brussels=%s NewYork=%s",
+        now_utc.isoformat(timespec="seconds"),
+        now_utc.astimezone(ZoneInfo("Europe/Brussels")).isoformat(timespec="seconds"),
+        now_utc.astimezone(ZoneInfo("America/New_York")).isoformat(timespec="seconds"),
+    )
 
     c = Mt5Client(mt5, Mt5ConnectionParams())
     c.initialize()
@@ -115,9 +129,10 @@ def main() -> int:
         plans = plan_h2l2_trades(m5, side, spec, strat_params)
         logger.info("Planner: planned trades=%d (before guardrails)", len(plans))
 
-        # Apply guardrails
+        # Apply guardrails in NY time (DST-safe)
         guard = Guardrails(
-            tz=args.tz,
+            session_tz=args.session_tz,
+            day_tz=args.day_tz,
             session_start=args.session_start,
             session_end=args.session_end,
             max_trades_per_day=args.max_trades_day,
