@@ -1,7 +1,7 @@
 # tests/test_mt5_client.py
 import types
-
 import pytest
+
 from utils.mt5_client import Mt5Client, Mt5ConnectionParams, symbol_info_to_dict
 
 
@@ -33,7 +33,6 @@ def mt5_mock():
         return [DummySymbol("US500.cash"), DummySymbol("US30.cash"), DummySymbol("EURUSD")]
 
     def symbol_info(symbol):
-        # visible false unless selected
         return DummyInfo(visible=state["selected"].get(symbol, False))
 
     def symbol_select(symbol, enable):
@@ -83,3 +82,23 @@ def test_symbol_info_to_dict_uses_asdict():
     d = symbol_info_to_dict(DummyInfo(visible=True))
     assert d["visible"] is True
     assert d["digits"] == 2
+
+
+def test_initialize_does_not_pass_none_login(mt5_mock):
+    captured = {}
+
+    def initialize(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    mt5_mock.initialize = initialize
+
+    c = Mt5Client(mt5_mock, Mt5ConnectionParams())
+    c.initialize()
+
+    assert "login" not in captured
+    assert "password" not in captured
+    assert "server" not in captured
+    assert "timeout" in captured
+
+    c.shutdown()

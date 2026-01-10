@@ -14,8 +14,10 @@ class Mt5Error(RuntimeError):
 
 @dataclass(frozen=True)
 class Mt5ConnectionParams:
-    # Voor de meeste setups is alleen initialize() voldoende (MT5 terminal open + ingelogd).
-    # Laat deze leeg tenzij je expliciet credentials/server via API wil doen.
+    """
+    Default: gebruik de reeds geopende + ingelogde MT5 terminal.
+    Alleen als je expliciet wil inloggen via API, zet je login/password/server.
+    """
     login: Optional[int] = None
     password: Optional[str] = None
     server: Optional[str] = None
@@ -35,12 +37,20 @@ class Mt5Client:
 
     def initialize(self) -> None:
         logger.info("Initializing MT5 connection...")
-        ok = self._mt5.initialize(
-            login=self._params.login,
-            password=self._params.password,
-            server=self._params.server,
-            timeout=self._params.timeout_ms,
-        )
+
+        # Some MetaTrader5 builds throw:
+        #   "Invalid login argument"
+        # if login/password/server are passed as None.
+        kwargs: Dict[str, Any] = {"timeout": self._params.timeout_ms}
+
+        if self._params.login is not None:
+            kwargs["login"] = int(self._params.login)
+        if self._params.password is not None:
+            kwargs["password"] = self._params.password
+        if self._params.server is not None:
+            kwargs["server"] = self._params.server
+
+        ok = self._mt5.initialize(**kwargs)
         if not ok:
             code, msg = self._safe_last_error()
             raise Mt5Error(f"MT5 initialize failed: {code} {msg}")
@@ -48,7 +58,11 @@ class Mt5Client:
         self._initialized = True
         term = self._mt5.terminal_info()
         acc = self._mt5.account_info()
-        logger.info("MT5 connected. Terminal=%s, Account=%s", getattr(term, "name", term), getattr(acc, "login", acc))
+        logger.info(
+            "MT5 connected. Terminal=%s, Account=%s",
+            getattr(term, "name", term),
+            getattr(acc, "login", acc),
+        )
 
     def shutdown(self) -> None:
         if self._initialized:
