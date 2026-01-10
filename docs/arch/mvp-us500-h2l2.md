@@ -41,3 +41,22 @@ DEBUG:
 - Unit: bar counting + symbol spec math + data cleaning
 - Property: incremental/no-lookahead + no-overlap + max-trades/day
 - Integratie smoke: 200 bars ophalen van MT5 + 1 backtest-run zonder crash
+
+## Dataflow (planner-only) – architectuur
+
+main.py
+  -> Mt5Client (connect/init/shutdown)
+  -> fetch_rates(M15) -> infer_trend_m15() -> Side (LONG/SHORT)
+  -> fetch_rates(M5)
+  -> plan_next_open_trade(M5, Side, SymbolSpec, H2L2Params, ...)
+  -> apply_guardrails([candidate], Guardrails)
+  -> log ACCEPT/REJECT (geen execution)
+
+## NEXT_OPEN contract (belangrijk)
+- Signal bar = laatst gesloten bar
+- Execute = open van de eerstvolgende bar
+- Geen look-ahead: de “signal bar” moet gesloten zijn.
+
+Omdat datasets kunnen verschillen:
+- MT5 live rates bevatten vaak een “current forming bar” (current_bar_included=True)
+- Backtest/CSV kan alleen gesloten bars bevatten (current_bar_included=False)

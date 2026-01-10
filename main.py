@@ -11,39 +11,23 @@ import pandas as pd
 
 from execution.guardrails import Guardrails, apply_guardrails
 from strategies.context import Trend, TrendParams, infer_trend_m15
-from strategies.h2l2 import Side, H2L2Params, plan_next_open_trade
+from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from utils.mt5_client import Mt5Client, Mt5ConnectionParams
 from utils.mt5_data import RatesRequest, fetch_rates
 from utils.symbol_spec import SymbolSpec
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-)
 logger = logging.getLogger("brooks")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Brooks H2/L2 NEXT_OPEN planner (no execution yet)")
+    p = argparse.ArgumentParser(description="Brooks H2/L2 planner-only (NEXT_OPEN)")
 
-    # Market
+    # Market / data
     p.add_argument("--symbol", default="US500.cash")
     p.add_argument("--m5-bars", type=int, default=500)
     p.add_argument("--m15-bars", type=int, default=300)
 
-    # Guardrails (DST-safe: define session + day counting in NY time)
-    p.add_argument("--max-trades-day", type=int, default=2)
-    p.add_argument("--session-tz", default="America/New_York")
-    p.add_argument("--day-tz", default="America/New_York")
-    p.add_argument("--session-start", default="09:30")  # NY cash open
-    p.add_argument("--session-end", default="15:00")    # stop new trades earlier than close
-
-    # Strategy params
-    p.add_argument("--min-risk", type=float, default=1.0, help="Minimum stop distance in price units (US500 points)")
-    p.add_argument("--close-frac", type=float, default=0.25, help="Signal bar close near extreme fraction")
-    p.add_argument("--cooldown-bars", type=int, default=3)
-
-    # Trend params
+    # Trend filter (M15)
     p.add_argument("--ema", type=int, default=20)
     p.add_argument("--slope-lookback", type=int, default=10)
     p.add_argument("--confirm-bars", type=int, default=20)
@@ -52,13 +36,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-slope", type=float, default=0.20)
     p.add_argument("--pullback-allowance", type=float, default=2.00)
 
+    # Strategy (M5)
+    p.add_argument("--min-risk", type=float, default=0.50, help="min risk in price units")
+    p.add_argument("--close-frac", type=float, default=0.60, help="close-near-high/low fraction")
+    p.add_argument("--cooldown-bars", type=int, default=0)
+
+    # NEXT_OPEN / bar timing
+    p.add_argument(
+        "--m5-timeframe-minutes",
+        type=int,
+        default=5,
+        help="Used only when dataset contains only closed bars (synthetic next bar timestamp).",
+    )
+
+    # Guardrails
+    p.add_argument("--max-trades-day", type=int, default=2)
+    p.add_argument("--session-tz", default="America/New_York")
+    p.add_argument("--day-tz", default="America/New_York")
+    p.add_argument("--session-start", default="09:30")
+    p.add_argument("--session-end", default="15:00")
+
+    # Logging
+    p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    # Time sanity
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+
     now_utc = datetime.now(timezone.utc)
     logger.info(
         "Clock UTC=%s Brussels=%s NewYork=%s",
@@ -127,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         last_bar_ts = m5.index[-1]
-        age_sec = (pd.Timestamp(now_utc).tz_convert("UTC") - last_bar_ts).total_seconds()
+        age_sec = (pd.Timestamp(now_utc) - last_bar_ts).total_seconds()
         logger.info("M5 last bar ts=%s age_sec=%.0f", last_bar_ts, age_sec)
 
         strat_params = H2L2Params(
@@ -136,14 +147,15 @@ def main(argv: list[str] | None = None) -> int:
             cooldown_bars=args.cooldown_bars,
         )
 
-        # NEXT_OPEN only (supports closed-bars-only via synthetic next bar)
+        # NEXT_OPEN only
         candidate = plan_next_open_trade(
             m5,
             side,
             spec,
             strat_params,
-            timeframe_minutes=5,
+            timeframe_minutes=args.m5_timeframe_minutes,
         )
+
         if candidate is None:
             logger.info("Planner: no NEXT_OPEN candidate for last bar (0 trades)")
             return 0
@@ -173,13 +185,20 @@ def main(argv: list[str] | None = None) -> int:
             t = accepted[0]
             logger.info(
                 "ACCEPT Signal=%s Exec=%s Side=%s Stop=%.2f Reason=%s",
-                t.signal_ts, t.execute_ts, t.side, t.stop, t.reason
+                t.signal_ts,
+                t.execute_ts,
+                t.side,
+                t.stop,
+                t.reason,
             )
         else:
             t, reason = rejected[0]
             logger.info(
                 "REJECT (%s) Signal=%s Exec=%s Side=%s",
-                reason, t.signal_ts, t.execute_ts, t.side
+                reason,
+                t.signal_ts,
+                t.execute_ts,
+                t.side,
             )
 
         return 0
