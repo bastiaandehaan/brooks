@@ -1,3 +1,4 @@
+# utils/symbol_spec.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,19 +18,16 @@ class SymbolSpec:
     volume_max: float
 
     @property
-    def value_per_point_per_lot(self) -> float:
+    def usd_per_price_unit_per_lot(self) -> float:
         """
-        USD value for a 1.00 price move (one index point) per 1.00 lot.
-        Derived from tick_value / tick_size scaled to 1.0 point.
+        USD value for a 1.0 price move per 1.0 lot.
+        US500.cash example: tick_size=0.01, tick_value=0.01 => 1.0 USD per 1.0 move.
         """
         if self.tick_size <= 0:
             raise ValueError("tick_size must be > 0")
-        return self.tick_value * (self.point / self.tick_size) if self.point != 1.0 else self.tick_value / self.tick_size
+        return float(self.tick_value) / float(self.tick_size)
 
-    def round_volume(self, vol: float) -> float:
-        """
-        Round volume DOWN to the nearest volume_step and clamp to [min, max].
-        """
+    def round_volume_down(self, vol: float) -> float:
         if vol <= 0:
             return 0.0
         steps = int(vol / self.volume_step)
