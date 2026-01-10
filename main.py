@@ -1,138 +1,201 @@
+# main.py
 from __future__ import annotations
 
 import argparse
 import logging
-from dataclasses import asdict
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-import MetaTrader5 as mt5
+import pandas as pd
 
 from execution.guardrails import Guardrails, apply_guardrails
-from strategies.context import infer_trend_m15
+from strategies.context import Trend, TrendParams, infer_trend_m15
 from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from utils.mt5_client import Mt5Client, Mt5ConnectionParams
-from utils.mt5_data import rates_to_df
+from utils.mt5_data import RatesRequest, fetch_rates
 from utils.symbol_spec import SymbolSpec
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-)
-logger = logging.getLogger("main")
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(level: str = "INFO") -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Brooks planner-only (NEXT_OPEN) – no execution.")
+    p = argparse.ArgumentParser()
+
+    # Data
     p.add_argument("--symbol", default="US500.cash")
-    p.add_argument("--m15-bars", type=int, default=400)
+    p.add_argument("--m15-bars", type=int, default=300)
     p.add_argument("--m5-bars", type=int, default=500)
     p.add_argument("--timeframe-minutes", type=int, default=5)
-    p.add_argument("--min-risk-points", type=float, default=2.0)
 
-    # Guardrails defaults (bewust conservatief / eenvoudig)
-    p.add_argument("--max-trades-per-day", type=int, default=2)
-    p.add_argument("--session-start", default="09:30")  # NY time
-    p.add_argument("--session-end", default="15:00")    # NY time (entries)
-    p.add_argument("--tz", default="America/New_York")
+    # Trend params
+    p.add_argument("--ema", type=int, default=20)
+    p.add_argument("--slope-lookback", type=int, default=10)
+    p.add_argument("--confirm-bars", type=int, default=20)
+    p.add_argument("--min-above-frac", type=float, default=0.60)
+    p.add_argument("--min-close-ema-dist", type=float, default=0.50)
+    p.add_argument("--min-slope", type=float, default=0.20)
+    p.add_argument("--pullback-allowance", type=float, default=2.00)
+
+    # Strategy params
+    p.add_argument(
+        "--min-risk-price-units",
+        "--min-risk-points",
+        dest="min_risk_price_units",
+        type=float,
+        default=1.0,
+    )
+    p.add_argument("--signal-close-frac", type=float, default=0.25)
+    p.add_argument("--cooldown-bars", type=int, default=0)
+
+    # Guardrails
+    p.add_argument("--session-tz", dest="session_tz", default="America/New_York")
+    p.add_argument("--day-tz", dest="day_tz", default="America/New_York")
+    p.add_argument("--session-start", default="09:30")
+    p.add_argument("--session-end", default="15:00")
+    p.add_argument(
+        "--max-trades-day",
+        "--max-trades-per-day",
+        dest="max_trades_day",
+        type=int,
+        default=2,
+    )
+
+    p.add_argument("--log-level", default="INFO")
+
     return p
 
 
-def _clock_log() -> None:
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    setup_logging(args.log_level)
+
+    # Log clocks (helpful when debugging session filters)
     now_utc = datetime.now(timezone.utc)
-    brussels = now_utc.astimezone(ZoneInfo("Europe/Brussels"))
-    newyork = now_utc.astimezone(ZoneInfo("America/New_York"))
-    logger.info("Clock UTC=%s Brussels=%s NewYork=%s", now_utc.isoformat(), brussels.isoformat(), newyork.isoformat())
+    logger.info(
+        "Clock UTC=%s Brussels=%s NewYork=%s",
+        now_utc.isoformat(timespec="seconds"),
+        now_utc.astimezone(ZoneInfo("Europe/Brussels")).isoformat(timespec="seconds"),
+        now_utc.astimezone(ZoneInfo("America/New_York")).isoformat(timespec="seconds"),
+    )
 
-
-def main() -> None:
-    args = build_parser().parse_args()
-    _clock_log()
+    import MetaTrader5 as mt5  # local import keeps tests lighter
 
     c = Mt5Client(mt5, Mt5ConnectionParams())
     c.initialize()
-
     try:
-        symbol = args.symbol
-        c.ensure_selected(symbol)
-
-        info = c.symbol_info(symbol)
-        spec = SymbolSpec.from_mt5_dict(info)
-
+        # Symbol + spec
+        c.ensure_selected(args.symbol)
+        info = c.symbol_info(args.symbol)
+        spec = SymbolSpec.from_symbol_info(info)
         logger.info(
-            "SymbolSpec: %s",
-            {
-                "name": spec.name,
-                "digits": spec.digits,
-                "tick_size": spec.tick_size,
-                "tick_value": spec.tick_value,
-                "usd_per_price_unit_per_lot": spec.usd_per_price_unit_per_lot,
-                "volume_min": spec.volume_min,
-                "volume_step": spec.volume_step,
-                "volume_max": spec.volume_max,
-            },
+            "SymbolSpec: %s digits=%d tick_size=%.5f tick_value=%.5f usd/price_unit/lot=%.5f vol_min=%.2f step=%.2f",
+            spec.name,
+            spec.digits,
+            spec.tick_size,
+            spec.tick_value,
+            spec.usd_per_price_unit_per_lot,
+            spec.volume_min,
+            spec.volume_step,
         )
 
-        # --- M15 trend filter ---
-        m15_rates = c.copy_rates(symbol, mt5.TIMEFRAME_M15, args.m15_bars)
-        m15 = rates_to_df(m15_rates)
-        trend, metrics = infer_trend_m15(m15)
-
+        # M15 trend
+        m15 = fetch_rates(
+            mt5,
+            RatesRequest(symbol=args.symbol, timeframe=mt5.TIMEFRAME_M15, count=args.m15_bars),
+        )
+        trend_params = TrendParams(
+            ema_period=args.ema,
+            slope_lookback=args.slope_lookback,
+            confirm_bars=args.confirm_bars,
+            min_above_frac=args.min_above_frac,
+            min_close_ema_dist=args.min_close_ema_dist,
+            min_slope=args.min_slope,
+            pullback_allowance=args.pullback_allowance,
+        )
+        trend, metrics = infer_trend_m15(m15, trend_params)
         logger.info(
-            "Trend(M15) side=%s metrics=%s",
-            trend.name,
-            {k: round(v, 4) if isinstance(v, float) else v for k, v in asdict(metrics).items()},
+            "Trend metrics: close=%.2f ema=%.2f d=%.2f close-ema=%.2f slope=%.3f above=%.2f below=%.2f",
+            metrics.last_close,
+            metrics.last_ema,
+            metrics.close_ema_dist,
+            metrics.last_close_minus_ema,
+            metrics.ema_slope,
+            metrics.above_frac,
+            metrics.below_frac,
         )
 
-        # --- M5 for H2/L2 ---
-        m5_rates = c.copy_rates(symbol, mt5.TIMEFRAME_M5, args.m5_bars)
-        m5 = rates_to_df(m5_rates)
+        if trend is None:
+            logger.info("Trend filter: NONE (skip)")
+            return 0
 
-        if len(m5) < 10:
-            logger.warning("Not enough M5 bars: n=%d", len(m5))
-            return
+        side = Side.LONG if trend == Trend.BULL else Side.SHORT
+        logger.info("Trend filter: %s => %s", trend, side)
 
-        last_ts = m5.index[-1]
-        now_utc = datetime.now(timezone.utc)
-        last_ts_utc = last_ts.tz_convert("UTC") if last_ts.tzinfo else last_ts.tz_localize("UTC")
-        age_sec = (now_utc - last_ts_utc.to_pydatetime()).total_seconds()
-        logger.info("M5 last bar ts=%s age_sec=%.0f", last_ts.isoformat(), age_sec)
+        # M5 data
+        m5 = fetch_rates(
+            mt5,
+            RatesRequest(symbol=args.symbol, timeframe=mt5.TIMEFRAME_M5, count=args.m5_bars),
+        )
+        last_bar_ts = m5.index[-1]
+        logger.info("M5 last bar ts: %s", last_bar_ts)
 
-        params = H2L2Params(min_risk_points=float(args.min_risk_points))
+        strat_params = H2L2Params(
+            min_risk_price_units=args.min_risk_price_units,
+            signal_close_frac=args.signal_close_frac,
+            cooldown_bars=args.cooldown_bars,
+        )
 
-        candidate = plan_next_open_trade(
-            m5=m5,
-            trend=Side.LONG if trend == Side.LONG else Side.SHORT,
+        t = plan_next_open_trade(
+            m5,
+            trend=side,
             spec=spec,
-            p=params,
-            timeframe_minutes=int(args.timeframe_minutes),
-            now_utc=now_utc,  # blokkeert fallback als last bar nog forming is
+            p=strat_params,
+            timeframe_minutes=args.timeframe_minutes,
+            now_utc=pd.Timestamp.now(tz="UTC"),
         )
 
-        if candidate is None:
-            logger.info("Planner: no NEXT_OPEN candidate for last bar.")
-            return
+        if t is None:
+            logger.info("Planner: no NEXT_OPEN candidate.")
+            return 0
 
-        guard = Guardrails(
-            timezone=args.tz,
+        g = Guardrails(
+            session_tz=args.session_tz,
+            day_tz=args.day_tz,
             session_start=args.session_start,
             session_end=args.session_end,
-            max_trades_per_day=int(args.max_trades_per_day),
+            max_trades_per_day=args.max_trades_day,
         )
+        accepted, rejected = apply_guardrails([t], g)
 
-        accepted, rejected = apply_guardrails([candidate], guard)
+        if rejected:
+            for _, reason in rejected:
+                logger.info("Guardrail reject: %s", reason)
 
-        logger.info("NEXT_OPEN candidate: %s", asdict(candidate))
-        logger.info("After guardrails: accepted=%d rejected=%d", len(accepted), len(rejected))
+        if not accepted:
+            logger.info("Planner: candidate rejected by guardrails.")
+            return 0
 
-        for t in accepted:
-            logger.info("ACCEPT trade: %s", asdict(t))
-        for t, reason in rejected:
-            logger.info("REJECT trade: %s reason=%s", asdict(t), reason)
+        pick = accepted[0]
+        logger.info(
+            "CANDIDATE: side=%s signal=%s exec=%s stop=%.5f reason=%s",
+            pick.side,
+            pick.signal_ts,
+            pick.execute_ts,
+            pick.stop,
+            pick.reason,
+        )
+        return 0
 
     finally:
         c.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

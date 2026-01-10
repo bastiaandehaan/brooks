@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import Enum, auto
-from typing import List, Optional, Union
+from enum import Enum
+from typing import List, Optional
 
 import pandas as pd
 
@@ -13,31 +13,36 @@ from utils.symbol_spec import SymbolSpec
 logger = logging.getLogger(__name__)
 
 
-class Side(Enum):
-    LONG = auto()
-    SHORT = auto()
+class Side(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
 
 
 @dataclass(frozen=True)
 class H2L2Params:
-    """
-    Minimal Brooks H2/L2 idee:
-    - LONG: higher-low pullback + bull reversal
-    - SHORT: lower-high pullback + bear reversal
+    # “price units” = index points (US500: 1.0 = 1 punt), niet ticks.
+    min_risk_price_units: float = 1.0
+    signal_close_frac: float = 0.25
+    cooldown_bars: int = 0
 
-    Dit is (bewust) simpel gehouden; we doen vooral correct dataflow + no-lookahead.
-    """
+    # legacy/compat (tests/old code)
     pullback_bars: int = 2
-    min_risk_points: float = 2.0  # proxy; later vervangen door echte sizing constraints
+    min_risk_points: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        # Als iemand nog min_risk_points gebruikt, map het 1-op-1 naar price units.
+        if self.min_risk_points is not None:
+            object.__setattr__(self, "min_risk_price_units", float(self.min_risk_points))
 
 
 @dataclass(frozen=True)
 class PlannedTrade:
-    symbol: str
+    # Let op: tests verwachten deze positional order:
+    # PlannedTrade(side, signal_ts, execute_ts, stop, reason)
     side: Side
-    signal_ts: pd.Timestamp   # laatst gesloten bar
-    execute_ts: pd.Timestamp  # open van eerstvolgende bar (NEXT_OPEN)
-    stop_price: float
+    signal_ts: pd.Timestamp
+    execute_ts: pd.Timestamp
+    stop: float
     reason: str
 
 
@@ -47,6 +52,28 @@ def _require_ohlc(m5: pd.DataFrame) -> None:
     if missing:
         raise ValueError(f"m5 missing columns: {sorted(missing)}")
 
+    if len(m5.index) and m5.index.tz is None:
+        raise ValueError("m5 index must be tz-aware (UTC recommended)")
+
+
+def _close_near_high(o: float, h: float, l: float, c: float, frac: float) -> bool:
+    rng = max(h - l, 1e-12)
+    return (h - c) <= frac * rng and c > o
+
+
+def _close_near_low(o: float, h: float, l: float, c: float, frac: float) -> bool:
+    rng = max(h - l, 1e-12)
+    return (c - l) <= frac * rng and c < o
+
+
+def _normalize_m5(m5: pd.DataFrame) -> pd.DataFrame:
+    # sort + drop duplicate timestamps (keep last)
+    if not m5.index.is_monotonic_increasing:
+        m5 = m5.sort_index()
+    if m5.index.has_duplicates:
+        m5 = m5[~m5.index.duplicated(keep="last")]
+    return m5
+
 
 def plan_h2l2_trades(
     m5: pd.DataFrame,
@@ -55,23 +82,30 @@ def plan_h2l2_trades(
     p: H2L2Params,
 ) -> List[PlannedTrade]:
     """
-    Produceert trades op basis van gesloten bars, met execute op de volgende bar open.
-    Contract: gebruikt NOOIT de laatste row als signaalbar (die is 'current forming' in live).
+    Signal on bar close(t), execute on open(t+1). No lookahead.
+
+    Simplified bar counting:
+    - LONG: during a pullback, count “attempts up”; take attempt #2 with bull-ish signal bar.
+    - SHORT: during a pullback, count “attempts down”; take attempt #2 with bear-ish signal bar.
     """
     _require_ohlc(m5)
-    if len(m5) < (p.pullback_bars + 3):
-        return []
+    m5 = _normalize_m5(m5)
 
-    # Zorg dat de index oplopend is
-    if not m5.index.is_monotonic_increasing:
-        m5 = m5.sort_index()
+    if len(m5) < 3:
+        return []
 
     trades: List[PlannedTrade] = []
 
-    # i loopt tot len-2 zodat m5.index[i+1] bestaat (execute_ts)
+    pullback_low: Optional[float] = None
+    pullback_high: Optional[float] = None
+    attempts = 0
+    cooldown = 0
+
+    # i loopt tot len-2 zodat i+1 (execute bar) bestaat
     for i in range(1, len(m5) - 1):
         bar = m5.iloc[i]
         prev = m5.iloc[i - 1]
+
         ts = m5.index[i]
         next_ts = m5.index[i + 1]
 
@@ -83,64 +117,104 @@ def plan_h2l2_trades(
         prev_h = float(prev["high"])
         prev_l = float(prev["low"])
 
+        if cooldown > 0:
+            cooldown -= 1
+            continue
+
         if trend == Side.LONG:
-            # bull reversal proxy: close > open
-            # higher-low proxy: low > prev_low
-            if (c > o) and (l > prev_l):
-                stop = l - spec.tick_size  # onder de signal bar low
+            # start/extend pullback: lows stepping down
+            if l < prev_l:
+                if pullback_low is None:
+                    pullback_low = l
+                    pullback_high = prev_h
+                    attempts = 0
+                else:
+                    pullback_low = min(pullback_low, l)
+                    pullback_high = max(pullback_high or prev_h, prev_h)
+
+            # attempt up: high takes out prior high
+            if pullback_low is not None and h > prev_h:
+                attempts += 1
+
+            if pullback_low is not None and attempts >= 2 and _close_near_high(o, h, l, c, p.signal_close_frac):
+                stop = pullback_low - spec.tick_size
                 risk_proxy = c - stop
-                if risk_proxy >= p.min_risk_points:
+                if risk_proxy >= p.min_risk_price_units:
                     trades.append(
                         PlannedTrade(
-                            symbol=spec.name,
                             side=Side.LONG,
                             signal_ts=ts,
                             execute_ts=next_ts,
-                            stop_price=stop,
-                            reason="H2 proxy: HL + bull close",
+                            stop=stop,
+                            reason="H2 LONG (bar-count) in bull context",
                         )
                     )
+                    logger.debug(
+                        "H2 LONG signal @%s exec=%s stop=%.5f risk_proxy=%.5f attempts=%d",
+                        ts, next_ts, stop, risk_proxy, attempts
+                    )
+                    pullback_low = None
+                    pullback_high = None
+                    attempts = 0
+                    cooldown = p.cooldown_bars
 
-        if trend == Side.SHORT:
-            # bear reversal proxy: close < open
-            # lower-high proxy: high < prev_high
-            if (c < o) and (h < prev_h):
-                stop = h + spec.tick_size  # boven de signal bar high
+        else:  # Side.SHORT
+            # start/extend pullback: highs stepping up
+            if h > prev_h:
+                if pullback_high is None:
+                    pullback_high = h
+                    pullback_low = prev_l
+                    attempts = 0
+                else:
+                    pullback_high = max(pullback_high, h)
+                    pullback_low = min(pullback_low or prev_l, prev_l)
+
+            # attempt down: low takes out prior low
+            if pullback_high is not None and l < prev_l:
+                attempts += 1
+
+            if pullback_high is not None and attempts >= 2 and _close_near_low(o, h, l, c, p.signal_close_frac):
+                stop = pullback_high + spec.tick_size
                 risk_proxy = stop - c
-                if risk_proxy >= p.min_risk_points:
+                if risk_proxy >= p.min_risk_price_units:
                     trades.append(
                         PlannedTrade(
-                            symbol=spec.name,
                             side=Side.SHORT,
                             signal_ts=ts,
                             execute_ts=next_ts,
-                            stop_price=stop,
-                            reason="L2 proxy: LH + bear close",
+                            stop=stop,
+                            reason="L2 SHORT (bar-count) in bear context",
                         )
                     )
+                    logger.debug(
+                        "L2 SHORT signal @%s exec=%s stop=%.5f risk_proxy=%.5f attempts=%d",
+                        ts, next_ts, stop, risk_proxy, attempts
+                    )
+                    pullback_low = None
+                    pullback_high = None
+                    attempts = 0
+                    cooldown = p.cooldown_bars
 
     return trades
 
 
 def _append_synthetic_next_bar(m5: pd.DataFrame, timeframe_minutes: int) -> pd.DataFrame:
     """
-    Voeg een extra (synthetic) bar toe met timestamp = last_ts + timeframe.
-    OHLC values zijn NaN; plan_h2l2_trades gebruikt de laatste row alleen als 'next_ts'.
+    Adds a synthetic next bar timestamp so the last CLOSED bar can be a signal bar,
+    and execute_ts becomes (last_ts + timeframe).
+    OHLC values are NaN; strategy never reads them for the synthetic row.
     """
-    if timeframe_minutes <= 0:
-        raise ValueError("timeframe_minutes must be > 0")
-
     last_ts = m5.index[-1]
-    next_ts = last_ts + pd.Timedelta(minutes=int(timeframe_minutes))
+    next_ts = last_ts + pd.Timedelta(minutes=timeframe_minutes)
+    if next_ts in m5.index:
+        return m5
 
-    # Maak lege row met juiste kolommen
-    row = {col: float("nan") for col in ["open", "high", "low", "close"]}
-    extra = pd.DataFrame([row], index=pd.DatetimeIndex([next_ts], name=m5.index.name))
-
-    out = pd.concat([m5, extra], axis=0)
-    out = out[~out.index.duplicated(keep="last")]
-    out = out.sort_index()
-    return out
+    syn = pd.DataFrame(
+        {"open": [float("nan")], "high": [float("nan")], "low": [float("nan")], "close": [float("nan")]},
+        index=pd.DatetimeIndex([next_ts]),
+    )
+    syn.index = syn.index.tz_convert(last_ts.tz)
+    return pd.concat([m5, syn], axis=0)
 
 
 def plan_next_open_trade(
@@ -150,68 +224,47 @@ def plan_next_open_trade(
     p: H2L2Params,
     *,
     timeframe_minutes: int = 5,
-    now_utc: Optional[Union[pd.Timestamp, "datetime.datetime"]] = None,
+    now_utc: Optional[pd.Timestamp] = None,
 ) -> Optional[PlannedTrade]:
     """
-    NEXT_OPEN planner:
-    - probeert eerst een trade te vinden met execute_ts == laatste index (MT5 current bar aanwezig)
-    - als die niet bestaat, en de laatste bar *waarschijnlijk gesloten is*,
-      dan voegen we 1 synthetic next bar toe (voor datasets met alleen gesloten bars)
-      en zoeken we execute_ts == synthetic last index.
+    NEXT_OPEN contract.
 
-    Belangrijk: om look-ahead te vermijden in live:
-    - als now_utc meegegeven is, doen we de synthetic fallback alleen wanneer
-      now_utc - last_ts >= timeframe_minutes (dus: last_ts is niet de current forming bar).
+    If only closed bars are present, we synthesize the next bar timestamp and force:
+      signal_ts == last_ts, execute_ts == last_ts + timeframe.
+
+    If a current bar is present (live), we prefer:
+      execute_ts == last_ts (current bar open), signal_ts == prev_ts
+
+    Heuristic:
+    - Try “closed-bars-only” path first (signal must be last_ts). If no such signal exists,
+      fall back to “current-bar-present” path (execute must be last_ts).
+
+    Optional now_utc can disable the synthetic path when last_ts is “fresh”.
     """
     _require_ohlc(m5)
+    m5 = _normalize_m5(m5)
     if len(m5) < 3:
         return None
 
-    if not m5.index.is_monotonic_increasing:
-        m5 = m5.sort_index()
-
     last_ts = m5.index[-1]
 
-    # 1) normale poging: current bar is aanwezig → execute op last_ts
-    trades = plan_h2l2_trades(m5, trend, spec, p)
-    candidates = [t for t in trades if t.execute_ts == last_ts]
-    if candidates:
-        chosen = candidates[-1]
-        logger.debug(
-            "NEXT_OPEN candidate found on current bar: signal=%s execute=%s side=%s",
-            chosen.signal_ts, chosen.execute_ts, chosen.side.name
-        )
-        return chosen
-
-    # 2) fallback: alleen als last bar waarschijnlijk gesloten is
-    allow_fallback = True
+    allow_synthetic = True
     if now_utc is not None:
-        now_ts = pd.Timestamp(now_utc).tz_convert("UTC") if pd.Timestamp(now_utc).tzinfo else pd.Timestamp(now_utc, tz="UTC")
-        last_ts_utc = last_ts.tz_convert("UTC") if last_ts.tzinfo else last_ts.tz_localize("UTC")
-        age_sec = (now_ts - last_ts_utc).total_seconds()
-        allow_fallback = age_sec >= (timeframe_minutes * 60)
+        if now_utc.tzinfo is None:
+            raise ValueError("now_utc must be tz-aware")
+        age_sec = (now_utc - last_ts).total_seconds()
+        allow_synthetic = age_sec >= (timeframe_minutes * 60)
 
-    if not allow_fallback:
-        logger.debug(
-            "No NEXT_OPEN candidate; fallback blocked (last bar likely forming). last_ts=%s",
-            last_ts,
-        )
-        return None
+    if allow_synthetic:
+        m5_syn = _append_synthetic_next_bar(m5, timeframe_minutes=timeframe_minutes)
+        trades_syn = plan_h2l2_trades(m5_syn, trend, spec, p)
+        last_signal = [t for t in trades_syn if t.signal_ts == last_ts]
+        if last_signal:
+            return last_signal[-1]
 
-    m5_plus = _append_synthetic_next_bar(m5, timeframe_minutes=timeframe_minutes)
-    new_last_ts = m5_plus.index[-1]
-    trades2 = plan_h2l2_trades(m5_plus, trend, spec, p)
-    candidates2 = [t for t in trades2 if t.execute_ts == new_last_ts]
-    if not candidates2:
-        logger.debug(
-            "No NEXT_OPEN candidate after synthetic bar. last_ts=%s synthetic_ts=%s",
-            last_ts, new_last_ts,
-        )
-        return None
+    trades = plan_h2l2_trades(m5, trend, spec, p)
+    last_exec = [t for t in trades if t.execute_ts == last_ts]
+    if last_exec:
+        return last_exec[-1]
 
-    chosen = candidates2[-1]
-    logger.debug(
-        "NEXT_OPEN candidate found via synthetic bar: signal=%s execute=%s side=%s",
-        chosen.signal_ts, chosen.execute_ts, chosen.side.name
-    )
-    return chosen
+    return None
