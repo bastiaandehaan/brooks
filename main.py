@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import MetaTrader5 as mt5
+import pandas as pd
 
 from execution.guardrails import Guardrails, apply_guardrails
 from strategies.context import Trend, TrendParams, infer_trend_m15
-from strategies.h2l2 import Side, H2L2Params, plan_h2l2_trades
+from strategies.h2l2 import Side, H2L2Params, plan_next_open_trade
 from utils.mt5_client import Mt5Client, Mt5ConnectionParams
 from utils.mt5_data import RatesRequest, fetch_rates
 from utils.symbol_spec import SymbolSpec
@@ -22,15 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger("brooks")
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(description="Brooks H2/L2 planner (NEXT_OPEN), no execution yet")
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Brooks H2/L2 NEXT_OPEN planner (no execution yet)")
 
     # Market
     p.add_argument("--symbol", default="US500.cash")
     p.add_argument("--m5-bars", type=int, default=500)
     p.add_argument("--m15-bars", type=int, default=300)
 
-    # Guardrails (interpret session and day limits in these timezones)
+    # Guardrails (DST-safe: define session + day counting in NY time)
     p.add_argument("--max-trades-day", type=int, default=2)
     p.add_argument("--session-tz", default="America/New_York")
     p.add_argument("--day-tz", default="America/New_York")
@@ -51,9 +52,13 @@ def main() -> int:
     p.add_argument("--min-slope", type=float, default=0.20)
     p.add_argument("--pullback-allowance", type=float, default=2.00)
 
-    args = p.parse_args()
+    return p
 
-    # Time sanity (laptop time != MT5 server time; we anchor on UTC and convert)
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    # Time sanity
     now_utc = datetime.now(timezone.utc)
     logger.info(
         "Clock UTC=%s Brussels=%s NewYork=%s",
@@ -80,7 +85,7 @@ def main() -> int:
             spec.volume_step,
         )
 
-        # Fetch M15 and infer trend
+        # M15 trend
         m15 = fetch_rates(
             mt5,
             RatesRequest(symbol=args.symbol, timeframe=mt5.TIMEFRAME_M15, count=args.m15_bars),
@@ -115,21 +120,44 @@ def main() -> int:
         side = Side.LONG if trend == Trend.BULL else Side.SHORT
         logger.info("Trend filter: %s => %s", trend, side)
 
-        # Fetch M5 and plan trades
+        # M5 data
         m5 = fetch_rates(
             mt5,
             RatesRequest(symbol=args.symbol, timeframe=mt5.TIMEFRAME_M5, count=args.m5_bars),
         )
+
+        last_bar_ts = m5.index[-1]
+        age_sec = (pd.Timestamp(now_utc).tz_convert("UTC") - last_bar_ts).total_seconds()
+        logger.info("M5 last bar ts=%s age_sec=%.0f", last_bar_ts, age_sec)
 
         strat_params = H2L2Params(
             min_risk_price_units=args.min_risk,
             signal_close_frac=args.close_frac,
             cooldown_bars=args.cooldown_bars,
         )
-        plans = plan_h2l2_trades(m5, side, spec, strat_params)
-        logger.info("Planner: planned trades=%d (before guardrails)", len(plans))
 
-        # Apply guardrails in NY time (DST-safe)
+        # NEXT_OPEN only (supports closed-bars-only via synthetic next bar)
+        candidate = plan_next_open_trade(
+            m5,
+            side,
+            spec,
+            strat_params,
+            timeframe_minutes=5,
+        )
+        if candidate is None:
+            logger.info("Planner: no NEXT_OPEN candidate for last bar (0 trades)")
+            return 0
+
+        logger.info(
+            "Planner: NEXT_OPEN candidate Signal=%s Exec=%s Side=%s Stop=%.2f Reason=%s",
+            candidate.signal_ts,
+            candidate.execute_ts,
+            candidate.side,
+            candidate.stop,
+            candidate.reason,
+        )
+
+        # Guardrails on single candidate
         guard = Guardrails(
             session_tz=args.session_tz,
             day_tz=args.day_tz,
@@ -138,17 +166,17 @@ def main() -> int:
             max_trades_per_day=args.max_trades_day,
             one_trade_per_execute_ts=True,
         )
-        accepted, rejected = apply_guardrails(plans, guard)
-
+        accepted, rejected = apply_guardrails([candidate], guard)
         logger.info("After guardrails: accepted=%d rejected=%d", len(accepted), len(rejected))
 
-        for t in accepted[-5:]:
+        if accepted:
+            t = accepted[0]
             logger.info(
                 "ACCEPT Signal=%s Exec=%s Side=%s Stop=%.2f Reason=%s",
                 t.signal_ts, t.execute_ts, t.side, t.stop, t.reason
             )
-
-        for t, reason in rejected[:5]:
+        else:
+            t, reason = rejected[0]
             logger.info(
                 "REJECT (%s) Signal=%s Exec=%s Side=%s",
                 reason, t.signal_ts, t.execute_ts, t.side
