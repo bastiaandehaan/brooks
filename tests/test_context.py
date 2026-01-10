@@ -9,12 +9,15 @@ def _mk(closes):
 
 
 def test_infer_trend_bull():
-    df = _mk(list(range(1, 80)))
-    t = infer_trend_m15(df, TrendParams(min_slope=0.0))
+    # clear uptrend with enough separation
+    closes = [100 + i * 0.5 for i in range(120)]
+    df = _mk(closes)
+    t, _ = infer_trend_m15(df, TrendParams(min_slope=0.1, min_close_ema_dist=0.1))
     assert t == Trend.BULL
 
 
 def test_infer_trend_bear():
-    df = _mk(list(range(80, 0, -1)))
-    t = infer_trend_m15(df, TrendParams(min_slope=0.0))
+    closes = [200 - i * 0.5 for i in range(120)]
+    df = _mk(closes)
+    t, _ = infer_trend_m15(df, TrendParams(min_slope=0.1, min_close_ema_dist=0.1))
     assert t == Trend.BEAR
