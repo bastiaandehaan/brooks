@@ -1,9 +1,10 @@
-# utils/mt5_client.py
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
+
+from utils.symbol_spec import SymbolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +15,6 @@ class Mt5Error(RuntimeError):
 
 @dataclass(frozen=True)
 class Mt5ConnectionParams:
-    """
-    Default: gebruik de reeds geopende + ingelogde MT5 terminal.
-    Alleen als je expliciet wil inloggen via API, zet je login/password/server.
-    """
     login: Optional[int] = None
     password: Optional[str] = None
     server: Optional[str] = None
@@ -26,8 +23,7 @@ class Mt5ConnectionParams:
 
 class Mt5Client:
     """
-    Dunne wrapper rond MetaTrader5 package.
-    Doel: symbol discovery + info dumps, met nette logging en testbaarheid.
+    Wrapper rond MetaTrader5 package.
     """
 
     def __init__(self, mt5_module, params: Mt5ConnectionParams = Mt5ConnectionParams()):
@@ -35,88 +31,85 @@ class Mt5Client:
         self._params = params
         self._initialized = False
 
-    def initialize(self) -> None:
+    def initialize(self) -> bool:
         logger.info("Initializing MT5 connection...")
 
-        # Some MetaTrader5 builds throw:
-        #   "Invalid login argument"
-        # if login/password/server are passed as None.
         kwargs: Dict[str, Any] = {"timeout": self._params.timeout_ms}
-
         if self._params.login is not None:
-            kwargs["login"] = int(self._params.login)
-        if self._params.password is not None:
+            kwargs["login"] = self._params.login
             kwargs["password"] = self._params.password
-        if self._params.server is not None:
             kwargs["server"] = self._params.server
 
-        ok = self._mt5.initialize(**kwargs)
-        if not ok:
+        if not self._mt5.initialize(**kwargs):
             code, msg = self._safe_last_error()
-            raise Mt5Error(f"MT5 initialize failed: {code} {msg}")
+            logger.error(f"MT5 initialize failed: {code} {msg}")
+            return False
 
         self._initialized = True
+
+        # Log terminal info
         term = self._mt5.terminal_info()
         acc = self._mt5.account_info()
-        logger.info(
-            "MT5 connected. Terminal=%s, Account=%s",
-            getattr(term, "name", term),
-            getattr(acc, "login", acc),
-        )
+        t_name = term.name if term else "Unknown"
+        a_login = acc.login if acc else "Unknown"
+        logger.info(f"MT5 connected. Terminal={t_name}, Account={a_login}")
+
+        return True
 
     def shutdown(self) -> None:
         if self._initialized:
-            logger.info("Shutting down MT5 connection...")
             self._mt5.shutdown()
-        self._initialized = False
+            self._initialized = False
+            logger.info("MT5 connection shutdown.")
 
-    def symbols_list(self) -> Sequence[Any]:
+    # --- Nieuw voor tests ---
+    def symbols_search(self, group: str = "") -> List[str]:
+        """Zoekt symbolen die matchen met 'group' (bijv. 'US500*')."""
         self._require_init()
-        syms = self._mt5.symbols_get()
-        if syms is None:
-            code, msg = self._safe_last_error()
-            raise Mt5Error(f"symbols_get() returned None: {code} {msg}")
-        logger.info("Loaded %d symbols from MT5", len(syms))
-        return syms
+        # symbols_get returns tuple of SymbolInfo objects
+        symbols = self._mt5.symbols_get(group)
+        if symbols is None:
+            return []
+        return [s.name for s in symbols]
 
-    def symbols_search(self, needle: str) -> List[Any]:
-        """
-        Case-insensitive substring match on symbol name.
-        """
+    def ensure_selected(self, symbol: str) -> bool:
+        """Zorgt dat een symbool in MarketWatch staat."""
         self._require_init()
-        needle_l = needle.lower().strip()
-        if not needle_l:
-            raise ValueError("needle must be non-empty")
+        if not self._mt5.symbol_select(symbol, True):
+            logger.error(f"Failed to select symbol {symbol}")
+            return False
+        return True
 
-        matches: List[Any] = []
-        for s in self.symbols_list():
-            name = getattr(s, "name", "")
-            if needle_l in name.lower():
-                matches.append(s)
+    # ------------------------
 
-        logger.info("Found %d symbols matching '%s'", len(matches), needle)
-        return matches
-
-    def ensure_selected(self, symbol: str, enable: bool = True) -> None:
+    def get_symbol_specification(self, symbol: str) -> Optional[SymbolSpec]:
         """
-        Zorgt dat symbool in MarketWatch zichtbaar is (nodig voor sommige brokers/feeds).
+        Haalt specificaties op en retourneert een SymbolSpec object.
         """
         self._require_init()
+
+        if not self.ensure_selected(symbol):
+            return None
+
         info = self._mt5.symbol_info(symbol)
         if info is None:
-            code, msg = self._safe_last_error()
-            raise Mt5Error(f"symbol_info({symbol}) returned None: {code} {msg}")
+            logger.error(f"Symbol {symbol} not found.")
+            return None
 
-        if getattr(info, "visible", False):
-            logger.debug("Symbol already visible: %s", symbol)
-            return
-
-        ok = self._mt5.symbol_select(symbol, enable)
-        if not ok:
-            code, msg = self._safe_last_error()
-            raise Mt5Error(f"symbol_select({symbol}, {enable}) failed: {code} {msg}")
-
-        logger.info("Symbol selected in MarketWatch: %s", symbol)
+        return SymbolSpec(
+            name=info.name,
+            digits=info.digits,
+            point=info.point,
+            trade_contract_size=info.trade_contract_size,
+            spread=info.spread,
+            stop_level=info.trade_stops_level,
+            volume_min=info.volume_min,
+            volume_max=info.volume_max,
+            volume_step=info.volume_step,
+            # Nieuwe velden vullen, met fallback als ze niet bestaan op het object
+            tick_size=getattr(info, 'trade_tick_size', 0.0),
+            tick_value=getattr(info, 'trade_tick_value', 0.0)
+        )
 
     def symbol_info(self, symbol: str) -> Dict[str, Any]:
         self._require_init()
@@ -138,26 +131,15 @@ class Mt5Client:
 
 
 def symbol_info_to_dict(info_obj: Any) -> Dict[str, Any]:
-    """
-    MetaTrader5 returns a namedtuple-like object (SymbolInfo).
-    Prefer _asdict() when available; fallback to vars()/dir().
-    """
     if hasattr(info_obj, "_asdict"):
         return dict(info_obj._asdict())
 
     if hasattr(info_obj, "__dict__"):
         return dict(info_obj.__dict__)
 
-    # Last resort: collect public attributes
-    out: Dict[str, Any] = {}
-    for k in dir(info_obj):
-        if k.startswith("_"):
-            continue
-        try:
-            v = getattr(info_obj, k)
-        except Exception:
-            continue
-        if callable(v):
-            continue
-        out[k] = v
-    return out
+    known_fields = [
+        "name", "digits", "point", "trade_contract_size",
+        "spread", "trade_stops_level", "volume_min",
+        "volume_max", "volume_step", "trade_tick_size", "trade_tick_value"
+    ]
+    return {k: getattr(info_obj, k) for k in known_fields if hasattr(info_obj, k)}
