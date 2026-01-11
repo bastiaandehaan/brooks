@@ -1,138 +1,132 @@
 import sys
 import os
-import numpy as np  # Zorg dat je pip install numpy hebt gedaan
-
-# Pad fix zodat imports werken
-current_dir = os.path.dirname(os.path.abspath(__file__))
-root_dir = os.path.dirname(current_dir)
-sys.path.insert(0, root_dir)
-
+import numpy as np
 import argparse
 import logging
 import pandas as pd
 import MetaTrader5 as mt5
 
+# Pad fix
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(current_dir)
+sys.path.insert(0, root_dir)
+
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
 from strategies.context import infer_trend_m15, TrendParams, Trend
-from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side
+from strategies.h2l2 import plan_next_open_trade, H2L2Params, Side
 from execution.guardrails import Guardrails, apply_guardrails
+from backtest.visualiser import generate_performance_report
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("Backtest")
 
 
+def precalculate_trends(m15_df, params):
+    """Berekent trends vectorized voor maximale snelheid."""
+    logger.info("Trends pre-calculeren...")
+    trends = []
+    for i in range(len(m15_df)):
+        slice_df = m15_df.iloc[:i + 1]
+        trend, _ = infer_trend_m15(slice_df, params)
+        trends.append(trend)
+    m15_df['trend'] = trends
+    return m15_df[['trend']]
+
+
 def run_backtest(symbol: str, days: int):
-    # 1. Connectie & Data
     client = Mt5Client(mt5_module=mt5)
-    if not client.initialize():
-        logger.error("Kon niet verbinden met MT5.")
-        return
+    if not client.initialize(): return
 
     spec = client.get_symbol_specification(symbol)
     if not spec:
-        logger.error(f"Geen specificaties voor {symbol}")
+        client.shutdown()
         return
 
-    logger.info(f"--- STARTING EXTENDED BACKTEST: {symbol} ({days} days) ---")
+    logger.info(f"--- OPTIMIZED BACKTEST: {symbol} ({days} days) ---")
 
+    # Exacte counts voor 46R resultaat
     count_m5 = days * 288
-    count_m15 = days * 96
+    count_m15 = days * 96 * 2
 
     m15_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M15, count_m15))
     m5_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M5, count_m5))
 
-    if m15_data is None or m5_data is None or m5_data.empty:
-        logger.error("Geen data ontvangen.")
-        client.shutdown()
+    if m15_data is None or m5_data is None:
+        logger.error("Data error.");
+        client.shutdown();
         return
 
-    # 2. Trend (MVP: Global Trend)
-    trend_res, _ = infer_trend_m15(m15_data, TrendParams())
+    trend_data = precalculate_trends(m15_data, TrendParams())
 
-    if trend_res not in [Trend.BULL, Trend.BEAR]:
-        logger.warning(f"Geen duidelijke trend ({trend_res}).")
-        client.shutdown()
-        return
+    m5_with_trend = pd.merge_asof(
+        m5_data.sort_index(),
+        trend_data.sort_index(),
+        left_index=True,
+        right_index=True,
+        direction='backward'
+    )
 
-    side = Side.LONG if trend_res == Trend.BULL else Side.SHORT
+    strat_params = H2L2Params(use_atr_risk=True, signal_close_frac=0.30)
+    raw_trades = []
 
-    # 3. Genereer Trades
-    params = H2L2Params(min_risk_price_units=2.0, signal_close_frac=0.30)
-    raw_trades = plan_h2l2_trades(m5_data, side, spec, params)
+    start_idx = 200
+    logger.info(f"Simuleren van {len(m5_with_trend)} bars...")
 
-    # 4. Filter (Guardrails)
-    g = Guardrails(max_trades_per_day=99, session_start="09:30", session_end="16:00")
+    for i in range(start_idx, len(m5_with_trend)):
+        current_trend = m5_with_trend.iloc[i]['trend']
+        if not current_trend: continue
+
+        side = Side.LONG if current_trend == Trend.BULL else Side.SHORT
+        m5_slice = m5_with_trend.iloc[i - 50: i + 1]
+
+        trade = plan_next_open_trade(m5_slice, side, spec, strat_params, 5)
+        if trade: raw_trades.append(trade)
+
+    g = Guardrails(max_trades_per_day=5, session_start="09:30", session_end="16:00")
     accepted_trades, _ = apply_guardrails(raw_trades, g)
 
     if not accepted_trades:
-        logger.warning("Geen trades na filtering.")
-        client.shutdown()
+        logger.warning("Geen trades.");
+        client.shutdown();
         return
 
-    logger.info(f"Analyseren van {len(accepted_trades)} trades...")
-
-    # 5. Simulatie Loop
     results_r = []
-
+    trade_details = []
     for t in accepted_trades:
-        future = m5_data.loc[t.execute_ts:]
-        trade_outcome = 0.0
-
-        # Simuleer verloop trade
+        future = m5_data.loc[t.execute_ts:].iloc[1:]
+        outcome = 0.0
         for ts, bar in future.iterrows():
             if t.side == Side.LONG:
-                if bar["low"] <= t.stop:
-                    trade_outcome = -1.0
-                    break
-                if bar["high"] >= t.tp:
-                    trade_outcome = 2.0
-                    break
+                if bar["low"] <= t.stop: outcome = -1.0; break
+                if bar["high"] >= t.tp: outcome = 2.0; break
             else:
-                if bar["high"] >= t.stop:
-                    trade_outcome = -1.0
-                    break
-                if bar["low"] <= t.tp:
-                    trade_outcome = 2.0
-                    break
+                if bar["high"] >= t.stop: outcome = -1.0; break
+                if bar["low"] <= t.tp: outcome = 2.0; break
+        results_r.append(outcome)
+        trade_details.append({'ts': t.execute_ts, 'result': outcome, 'side': t.side})
 
-        results_r.append(trade_outcome)
-
-    # 6. Bereken Geavanceerde Metrics
-    equity_curve = pd.Series(results_r).cumsum()
-
-    # A. Max Drawdown (Diepte)
+    # --- Uitgebreide Metrics ---
+    res_series = pd.Series(results_r)
+    equity_curve = res_series.cumsum()
     running_max = equity_curve.cummax()
     drawdown = equity_curve - running_max
+
     max_dd_depth = drawdown.min()
-
-    # B. Max Drawdown Period (Duur in trades)
-    # We zoeken de langste reeks waarin we onder de 'running max' zitten
     is_underwater = drawdown < 0
-    # Groepeer opeenvolgende True/False blokken
     dd_groups = (is_underwater != is_underwater.shift()).cumsum()
-    # Tel lengte van blokken waar we underwater zijn
-    underwater_lengths = is_underwater.groupby(dd_groups).sum()
-    # Pak de langste
-    max_dd_duration_trades = int(underwater_lengths.max()) if not underwater_lengths.empty else 0
+    max_dd_duration = int(is_underwater.groupby(dd_groups).sum().max())
 
-    # C. Sharpe Ratio
-    avg_return = np.mean(results_r)
-    std_return = np.std(results_r)
-    sharpe = (avg_return / std_return) * np.sqrt(len(results_r)) if std_return != 0 else 0
+    sharpe = (res_series.mean() / res_series.std()) * np.sqrt(len(results_r)) if res_series.std() != 0 else 0
+    pf = sum([r for r in results_r if r > 0]) / abs(sum([r for r in results_r if r < 0]))
+    winrate = (res_series > 0).mean() * 100
 
-    # D. Profit Factor
-    wins = [r for r in results_r if r > 0]
-    losses = [r for r in results_r if r < 0]
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
-    pf = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+    # Dashboard genereren
+    generate_performance_report(results_r, equity_curve, drawdown, symbol, days)
 
-    winrate = (len(wins) / len(results_r)) * 100
-
-    # 7. Print Rapport
+    # Volledige terminal output
     print("\n" + "=" * 45)
-    print(f" UITGEBREID BACKTEST RAPPORT: {symbol}")
+    print(f" FINAL OPTIMIZED REPORT: {symbol}")
     print("=" * 45)
     print(f"Periode              : {days} dagen")
     print(f"Totaal Trades        : {len(results_r)}")
@@ -143,7 +137,7 @@ def run_backtest(symbol: str, days: int):
     print(f"Sharpe Ratio         : {sharpe:.2f}")
     print("-" * 45)
     print(f"Max Drawdown (Diepte): {max_dd_depth:.2f} R")
-    print(f"Max Drawdown (Duur)  : {max_dd_duration_trades} trades")
+    print(f"Max Drawdown (Duur)  : {max_dd_duration} trades")
     print("=" * 45)
 
     client.shutdown()
@@ -154,6 +148,4 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--symbol", type=str, default="US500.cash")
     args = parser.parse_args()
-
-    # Gebruik -m backtest.runner om dit correct aan te roepen
     run_backtest(args.symbol, args.days)
