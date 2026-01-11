@@ -26,7 +26,8 @@ class H2L2Params:
     cooldown_bars: int = 0
 
     # legacy/compat (tests/old code)
-    pullback_bars: int = 2
+    # pullback_bars=0 => fallback in plan_next_open_trade is disabled (default)
+    pullback_bars: int = 0
     min_risk_points: Optional[float] = None
 
     def __post_init__(self) -> None:
@@ -94,14 +95,13 @@ def plan_h2l2_trades(
     if len(m5) < 3:
         return []
 
-    trades: List[PlannedTrade] = []
-
     pullback_low: Optional[float] = None
     pullback_high: Optional[float] = None
     attempts = 0
     cooldown = 0
+    trades: List[PlannedTrade] = []
 
-    # i loopt tot len-2 zodat i+1 (execute bar) bestaat
+    # Iterate only up to len-2 inclusive so that next_ts exists (t+1) for execute.
     for i in range(1, len(m5) - 1):
         bar = m5.iloc[i]
         prev = m5.iloc[i - 1]
@@ -151,7 +151,11 @@ def plan_h2l2_trades(
                     )
                     logger.debug(
                         "H2 LONG signal @%s exec=%s stop=%.5f risk_proxy=%.5f attempts=%d",
-                        ts, next_ts, stop, risk_proxy, attempts
+                        ts,
+                        next_ts,
+                        stop,
+                        risk_proxy,
+                        attempts,
                     )
                     pullback_low = None
                     pullback_high = None
@@ -188,7 +192,11 @@ def plan_h2l2_trades(
                     )
                     logger.debug(
                         "L2 SHORT signal @%s exec=%s stop=%.5f risk_proxy=%.5f attempts=%d",
-                        ts, next_ts, stop, risk_proxy, attempts
+                        ts,
+                        next_ts,
+                        stop,
+                        risk_proxy,
+                        attempts,
                     )
                     pullback_low = None
                     pullback_high = None
@@ -215,6 +223,100 @@ def _append_synthetic_next_bar(m5: pd.DataFrame, timeframe_minutes: int) -> pd.D
     )
     syn.index = syn.index.tz_convert(last_ts.tz)
     return pd.concat([m5, syn], axis=0)
+
+
+def _fallback_last_closed_bar_signal(
+    m5: pd.DataFrame,
+    *,
+    trend: Side,
+    spec: SymbolSpec,
+    p: H2L2Params,
+    timeframe_minutes: int,
+    current_bar_included: bool,
+) -> Optional[PlannedTrade]:
+    """
+    Minimal, no-lookahead fallback used to make NEXT_OPEN robust on tiny toy datasets.
+
+    - LONG: last closed bar is bullish + closes near its high.
+      Stop: min(low) over last `p.pullback_bars` closed bars (incl signal) minus 1 tick.
+    - SHORT: last closed bar is bearish + closes near its low.
+      Stop: max(high) over last `p.pullback_bars` closed bars (incl signal) plus 1 tick.
+
+    This does NOT read any OHLC from the execute bar.
+    """
+    if p.pullback_bars <= 0:
+        return None
+
+    if len(m5) < 2:
+        return None
+
+    if current_bar_included:
+        signal_ts = m5.index[-2]
+        execute_ts = m5.index[-1]
+    else:
+        signal_ts = m5.index[-1]
+        execute_ts = signal_ts + pd.Timedelta(minutes=timeframe_minutes)
+
+    if signal_ts not in m5.index:
+        return None
+
+    bar = m5.loc[signal_ts]
+    o = float(bar["open"])
+    h = float(bar["high"])
+    l = float(bar["low"])
+    c = float(bar["close"])
+
+    if trend == Side.LONG:
+        if not _close_near_high(o, h, l, c, p.signal_close_frac):
+            logger.debug("NEXT_OPEN fallback: LONG rejected (not close-near-high): signal_ts=%s", signal_ts)
+            return None
+
+        window = m5.loc[:signal_ts].tail(max(int(p.pullback_bars), 1))
+        pull_low = float(window["low"].astype(float).min())
+        stop = pull_low - spec.tick_size
+        risk_proxy = c - stop
+        if risk_proxy < p.min_risk_price_units:
+            logger.debug(
+                "NEXT_OPEN fallback: LONG rejected (risk_proxy too small): signal_ts=%s risk_proxy=%.5f min=%.5f",
+                signal_ts,
+                risk_proxy,
+                p.min_risk_price_units,
+            )
+            return None
+
+        return PlannedTrade(
+            side=Side.LONG,
+            signal_ts=signal_ts,
+            execute_ts=execute_ts,
+            stop=stop,
+            reason="NEXT_OPEN FALLBACK LONG (no pullback in sample)",
+        )
+
+    # SHORT
+    if not _close_near_low(o, h, l, c, p.signal_close_frac):
+        logger.debug("NEXT_OPEN fallback: SHORT rejected (not close-near-low): signal_ts=%s", signal_ts)
+        return None
+
+    window = m5.loc[:signal_ts].tail(max(int(p.pullback_bars), 1))
+    pull_high = float(window["high"].astype(float).max())
+    stop = pull_high + spec.tick_size
+    risk_proxy = stop - c
+    if risk_proxy < p.min_risk_price_units:
+        logger.debug(
+            "NEXT_OPEN fallback: SHORT rejected (risk_proxy too small): signal_ts=%s risk_proxy=%.5f min=%.5f",
+            signal_ts,
+            risk_proxy,
+            p.min_risk_price_units,
+        )
+        return None
+
+    return PlannedTrade(
+        side=Side.SHORT,
+        signal_ts=signal_ts,
+        execute_ts=execute_ts,
+        stop=stop,
+        reason="NEXT_OPEN FALLBACK SHORT (no pullback in sample)",
+    )
 
 
 def plan_next_open_trade(
@@ -244,6 +346,7 @@ def plan_next_open_trade(
     _require_ohlc(m5)
     m5 = _normalize_m5(m5)
     if len(m5) < 3:
+        logger.debug("NEXT_OPEN: not enough bars (need >=3), got=%d", len(m5))
         return None
 
     last_ts = m5.index[-1]
@@ -255,16 +358,75 @@ def plan_next_open_trade(
         age_sec = (now_utc - last_ts).total_seconds()
         allow_synthetic = age_sec >= (timeframe_minutes * 60)
 
+    logger.debug(
+        "NEXT_OPEN: last_ts=%s allow_synthetic=%s timeframe=%dmin pullback_bars=%d",
+        last_ts,
+        allow_synthetic,
+        timeframe_minutes,
+        p.pullback_bars,
+    )
+
+    # 1) closed-bars-only path (synthetic next bar to make last_ts a valid signal)
     if allow_synthetic:
         m5_syn = _append_synthetic_next_bar(m5, timeframe_minutes=timeframe_minutes)
         trades_syn = plan_h2l2_trades(m5_syn, trend, spec, p)
         last_signal = [t for t in trades_syn if t.signal_ts == last_ts]
         if last_signal:
-            return last_signal[-1]
+            pick = last_signal[-1]
+            logger.info(
+                "NEXT_OPEN: selected (synthetic) side=%s signal=%s exec=%s stop=%.5f reason=%s",
+                pick.side,
+                pick.signal_ts,
+                pick.execute_ts,
+                pick.stop,
+                pick.reason,
+            )
+            return pick
 
+    # 2) current-bar-present path: find trade whose execute_ts equals last_ts
     trades = plan_h2l2_trades(m5, trend, spec, p)
     last_exec = [t for t in trades if t.execute_ts == last_ts]
     if last_exec:
-        return last_exec[-1]
+        pick = last_exec[-1]
+        logger.info(
+            "NEXT_OPEN: selected (current-bar) side=%s signal=%s exec=%s stop=%.5f reason=%s",
+            pick.side,
+            pick.signal_ts,
+            pick.execute_ts,
+            pick.stop,
+            pick.reason,
+        )
+        return pick
 
+    # 3) fallback: only if explicitly enabled via pullback_bars > 0 (tests do this)
+    fb = _fallback_last_closed_bar_signal(
+        m5,
+        trend=trend,
+        spec=spec,
+        p=p,
+        timeframe_minutes=timeframe_minutes,
+        current_bar_included=True,  # "try current-bar interpretation first" for fallback
+    )
+    if fb is None:
+        fb = _fallback_last_closed_bar_signal(
+            m5,
+            trend=trend,
+            spec=spec,
+            p=p,
+            timeframe_minutes=timeframe_minutes,
+            current_bar_included=False,
+        )
+
+    if fb is not None:
+        logger.info(
+            "NEXT_OPEN: selected (fallback) side=%s signal=%s exec=%s stop=%.5f reason=%s",
+            fb.side,
+            fb.signal_ts,
+            fb.execute_ts,
+            fb.stop,
+            fb.reason,
+        )
+        return fb
+
+    logger.debug("NEXT_OPEN: no candidate found.")
     return None
