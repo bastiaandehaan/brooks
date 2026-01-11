@@ -19,15 +19,12 @@ class Side(str, Enum):
 @dataclass(frozen=True)
 class H2L2Params:
     min_risk_price_units: float = 1.0
-    min_risk_points: float = 1.0
     signal_close_frac: float = 0.25
     cooldown_bars: int = 0
     pullback_bars: int = 2
 
     @property
     def risk_dist(self) -> float:
-        if self.min_risk_points != 1.0 and self.min_risk_points != 0:
-            return self.min_risk_points
         return self.min_risk_price_units
 
 
@@ -50,84 +47,88 @@ def plan_next_open_trade(
         timeframe_minutes: int,
         now_utc: pd.Timestamp | None = None
 ) -> Optional[PlannedTrade]:
-    if len(m5) < p.pullback_bars + 1:
+    """
+    Price Action Logica:
+    Zoekt naar een sterke reversal bar na een pullback in de trend.
+    """
+    if len(m5) < 3:
         return None
 
-    # MOCK LOGICA:
-    # De tests gebruiken specifieke tijdstippen.
-    # Test 1: Data t/m 15:55. Signaal verwacht op 15:50 (index -2). Executie op 15:55 (index -1).
-    # Test 2: Data t/m 15:50. Signaal verwacht op 15:50 (index -1). Executie op 15:55 (toekomst).
+    # Context:
+    # [-1] = Huidige Open Bar (executie)
+    # [-2] = Signal Bar (net gesloten)
+    # [-3] = Bar voor Signal
 
-    # We definiëren een simpele helper die bepaalt of een bar een 'signaal' is.
-    # Voor de tests is 15:50 (minuut 50) de magic key.
-    def is_signal(ts):
-        return ts.minute == 50
+    signal_bar = m5.iloc[-2]
+    prev_bar = m5.iloc[-3]
+    curr_idx = m5.index[-1]
 
-    # 1. Check Scenario: Signaal op index -2 (dus executie op index -1, NU)
-    if len(m5) >= 2:
-        prev_idx = m5.index[-2]
-        if is_signal(prev_idx) and p.pullback_bars > 0:
+    risk = p.risk_dist
+
+    # --- LONG SETUP ---
+    if trend == Side.LONG:
+        # Pullback: High lager dan vorige high, of rode candle
+        is_pullback = (signal_bar["high"] < prev_bar["high"]) or (signal_bar["close"] < signal_bar["open"])
+
+        # Signal Bar Strength
+        bar_range = signal_bar["high"] - signal_bar["low"]
+        if bar_range == 0: return None
+
+        # Close in upper % (1.0 = High)
+        close_loc = (signal_bar["close"] - signal_bar["low"]) / bar_range
+        is_strong_close = close_loc > (1.0 - p.signal_close_frac)
+
+        if is_pullback and is_strong_close:
             entry = float(m5.iloc[-1]["open"])
-            risk = p.risk_dist
-            stop = entry - risk if trend == Side.LONG else entry + risk
-            tp = entry + risk if trend == Side.LONG else entry - risk
+            stop = entry - risk
+            tp = entry + (risk * 2.0)
 
             return PlannedTrade(
-                signal_ts=prev_idx,
-                execute_ts=m5.index[-1],
-                side=trend,
+                signal_ts=m5.index[-2],
+                execute_ts=curr_idx,
+                side=Side.LONG,
                 entry=entry,
                 stop=stop,
                 tp=tp,
-                reason="H2L2 MVP Signal (Current Bar)"
+                reason=f"Bull Reversal (Str={close_loc:.2f})"
             )
 
-    # 2. Check Scenario: Signaal op index -1 (dus executie in TOEKOMST)
-    last_idx = m5.index[-1]
-    if is_signal(last_idx) and p.pullback_bars > 0:
-        execute_time = last_idx + pd.Timedelta(minutes=timeframe_minutes)
-        entry = float(m5.iloc[-1]["close"])
-        risk = p.risk_dist
-        stop = entry - risk if trend == Side.LONG else entry + risk
-        tp = entry + risk if trend == Side.LONG else entry - risk
+    # --- SHORT SETUP ---
+    elif trend == Side.SHORT:
+        # Pullback: Low hoger dan vorige low, of groene candle
+        is_pullback = (signal_bar["low"] > prev_bar["low"]) or (signal_bar["close"] > signal_bar["open"])
 
-        return PlannedTrade(
-            signal_ts=last_idx,
-            execute_ts=execute_time,
-            side=trend,
-            entry=entry,
-            stop=stop,
-            tp=tp,
-            reason="H2L2 MVP Signal (Next Bar)"
-        )
+        bar_range = signal_bar["high"] - signal_bar["low"]
+        if bar_range == 0: return None
+
+        # Close in lower % (0.0 = Low)
+        close_loc = (signal_bar["high"] - signal_bar["close"]) / bar_range
+        is_strong_close = close_loc > (1.0 - p.signal_close_frac)
+
+        if is_pullback and is_strong_close:
+            entry = float(m5.iloc[-1]["open"])
+            stop = entry + risk
+            tp = entry - (risk * 2.0)
+
+            return PlannedTrade(
+                signal_ts=m5.index[-2],
+                execute_ts=curr_idx,
+                side=Side.SHORT,
+                entry=entry,
+                stop=stop,
+                tp=tp,
+                reason=f"Bear Reversal (Str={close_loc:.2f})"
+            )
 
     return None
 
 
-def plan_h2l2_trades(
-        m5: pd.DataFrame,
-        trend: Side,
-        spec: SymbolSpec,
-        p: H2L2Params
-) -> List[PlannedTrade]:
+def plan_h2l2_trades(m5: pd.DataFrame, trend: Side, spec: SymbolSpec, p: H2L2Params) -> List[PlannedTrade]:
     trades = []
-    for i in range(p.pullback_bars, len(m5) - 1):
-        # Voor test_h2l2.py (verwacht trade op index 4 -> 5)
-        if i == 4:
-            curr_idx = m5.index[i]
-            next_idx = m5.index[i + 1]
-            entry = float(m5.iloc[i + 1]["open"])
-            risk = p.risk_dist
-            stop = entry - risk if trend == Side.LONG else entry + risk
-            tp = entry + risk if trend == Side.LONG else entry - risk
-
-            trades.append(PlannedTrade(
-                signal_ts=curr_idx,
-                execute_ts=next_idx,
-                side=trend,
-                entry=entry,
-                stop=stop,
-                tp=tp,
-                reason="Backtest Mock"
-            ))
+    # Start bij 50 voor buffer
+    for i in range(50, len(m5)):
+        current_slice = m5.iloc[:i + 1]
+        trade = plan_next_open_trade(current_slice, trend, spec, p, timeframe_minutes=5)
+        if trade:
+            trades.append(trade)
     return trades
