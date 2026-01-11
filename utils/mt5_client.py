@@ -22,10 +22,6 @@ class Mt5ConnectionParams:
 
 
 class Mt5Client:
-    """
-    Wrapper rond MetaTrader5 package.
-    """
-
     def __init__(self, mt5_module, params: Mt5ConnectionParams = Mt5ConnectionParams()):
         self._mt5 = mt5_module
         self._params = params
@@ -33,7 +29,6 @@ class Mt5Client:
 
     def initialize(self) -> bool:
         logger.info("Initializing MT5 connection...")
-
         kwargs: Dict[str, Any] = {"timeout": self._params.timeout_ms}
         if self._params.login is not None:
             kwargs["login"] = self._params.login
@@ -47,13 +42,11 @@ class Mt5Client:
 
         self._initialized = True
 
-        # Log terminal info
         term = self._mt5.terminal_info()
         acc = self._mt5.account_info()
         t_name = term.name if term else "Unknown"
         a_login = acc.login if acc else "Unknown"
         logger.info(f"MT5 connected. Terminal={t_name}, Account={a_login}")
-
         return True
 
     def shutdown(self) -> None:
@@ -62,57 +55,46 @@ class Mt5Client:
             self._initialized = False
             logger.info("MT5 connection shutdown.")
 
-    # --- Nieuw voor tests ---
     def symbols_search(self, group: str = "") -> List[str]:
-        """Zoekt symbolen die matchen met 'group' (bijv. 'US500*')."""
         self._require_init()
-        # symbols_get returns tuple of SymbolInfo objects
         symbols = self._mt5.symbols_get(group)
         if symbols is None:
             return []
         return [s.name for s in symbols]
 
     def ensure_selected(self, symbol: str) -> bool:
-        """Zorgt dat een symbool in MarketWatch staat."""
         self._require_init()
         if not self._mt5.symbol_select(symbol, True):
             logger.error(f"Failed to select symbol {symbol}")
             return False
         return True
 
-    # ------------------------
-
     def get_symbol_specification(self, symbol: str) -> Optional[SymbolSpec]:
         """
         Haalt specificaties op en retourneert een SymbolSpec object.
         """
-        self._require_init()
-
-        if not self.ensure_selected(symbol):
+        # 1. Haal de data op als dictionary via onze helper
+        try:
+            info_dict = self.symbol_info(symbol)
+        except Mt5Error as e:
+            logger.error(f"Error getting spec for {symbol}: {e}")
             return None
 
-        info = self._mt5.symbol_info(symbol)
-        if info is None:
-            logger.error(f"Symbol {symbol} not found.")
+        # 2. Gebruik de factory methode in SymbolSpec om mapping fouten te voorkomen
+        try:
+            return SymbolSpec.from_symbol_info(info_dict)
+        except Exception as e:
+            logger.error(f"Failed to create SymbolSpec for {symbol}: {e}")
             return None
-
-        return SymbolSpec(
-            name=info.name,
-            digits=info.digits,
-            point=info.point,
-            trade_contract_size=info.trade_contract_size,
-            spread=info.spread,
-            stop_level=info.trade_stops_level,
-            volume_min=info.volume_min,
-            volume_max=info.volume_max,
-            volume_step=info.volume_step,
-            # Nieuwe velden vullen, met fallback als ze niet bestaan op het object
-            tick_size=getattr(info, 'trade_tick_size', 0.0),
-            tick_value=getattr(info, 'trade_tick_value', 0.0)
-        )
 
     def symbol_info(self, symbol: str) -> Dict[str, Any]:
+        """Wrapper rond mt5.symbol_info die altijd een dict teruggeeft."""
         self._require_init()
+
+        # Zorg dat hij geselecteerd is
+        if not self.ensure_selected(symbol):
+            raise Mt5Error(f"Could not select {symbol}")
+
         info = self._mt5.symbol_info(symbol)
         if info is None:
             code, msg = self._safe_last_error()
@@ -131,15 +113,18 @@ class Mt5Client:
 
 
 def symbol_info_to_dict(info_obj: Any) -> Dict[str, Any]:
+    """Zet MT5 object om naar dict."""
     if hasattr(info_obj, "_asdict"):
         return dict(info_obj._asdict())
 
     if hasattr(info_obj, "__dict__"):
         return dict(info_obj.__dict__)
 
+    # Fallback velden (dit dekt de meeste mocks en echte objecten)
     known_fields = [
-        "name", "digits", "point", "trade_contract_size",
-        "spread", "trade_stops_level", "volume_min",
-        "volume_max", "volume_step", "trade_tick_size", "trade_tick_value"
+        "name", "digits", "point",
+        "trade_contract_size", "spread", "trade_stops_level",
+        "volume_min", "volume_max", "volume_step",
+        "trade_tick_size", "trade_tick_value"
     ]
     return {k: getattr(info_obj, k) for k in known_fields if hasattr(info_obj, k)}

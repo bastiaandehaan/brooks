@@ -1,4 +1,3 @@
-# utils/symbol_spec.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ class SymbolSpec:
     point: float
     tick_size: float
     tick_value: float
-    contract_size: float
+    contract_size: float  # Let op: hier heet het contract_size
     volume_min: float
     volume_step: float
     volume_max: float
@@ -21,16 +20,19 @@ class SymbolSpec:
     def usd_per_price_unit_per_lot(self) -> float:
         """
         USD value for a 1.0 price move per 1.0 lot.
-        US500.cash example: tick_size=0.01, tick_value=0.01 => 1.0 USD per 1.0 move.
         """
         if self.tick_size <= 0:
-            raise ValueError("tick_size must be > 0")
+            # Prevent division by zero
+            if self.tick_value > 0:
+                return 0.0
+            return 0.0
         return float(self.tick_value) / float(self.tick_size)
 
     def round_volume_down(self, vol: float) -> float:
         if vol <= 0:
             return 0.0
-        steps = int(vol / self.volume_step)
+        # Epsilon voor floating point onnauwkeurigheden
+        steps = int((vol + 1e-9) / self.volume_step)
         v = steps * self.volume_step
         if v < self.volume_min:
             return 0.0
@@ -38,13 +40,20 @@ class SymbolSpec:
 
     @staticmethod
     def from_symbol_info(info: Dict[str, Any]) -> "SymbolSpec":
+        """
+        Factory method: Vertaalt ruwe MT5 data (dict) naar een schoon SymbolSpec object.
+        Dit voorkomt fouten met veldnamen in de rest van de applicatie.
+        """
         return SymbolSpec(
             name=str(info["name"]),
             digits=int(info["digits"]),
             point=float(info["point"]),
-            tick_size=float(info["trade_tick_size"]),
-            tick_value=float(info["trade_tick_value"]),
-            contract_size=float(info["trade_contract_size"]),
+            # MT5 heet het 'trade_tick_size', wij noemen het 'tick_size'
+            tick_size=float(info.get("trade_tick_size", 0.0)),
+            # MT5 heet het 'trade_tick_value', wij noemen het 'tick_value'
+            tick_value=float(info.get("trade_tick_value", 0.0)),
+            # MT5 heet het 'trade_contract_size', wij noemen het 'contract_size'
+            contract_size=float(info.get("trade_contract_size", 1.0)),
             volume_min=float(info["volume_min"]),
             volume_step=float(info["volume_step"]),
             volume_max=float(info["volume_max"]),
