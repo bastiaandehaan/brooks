@@ -225,21 +225,21 @@ def _append_synthetic_next_bar(m5: pd.DataFrame, timeframe_minutes: int) -> pd.D
     return pd.concat([m5, syn], axis=0)
 
 
-def _fallback_last_closed_bar_signal(
+def _fallback_signal_at_ts(
     m5: pd.DataFrame,
     *,
     trend: Side,
     spec: SymbolSpec,
     p: H2L2Params,
-    timeframe_minutes: int,
-    current_bar_included: bool,
+    signal_ts: pd.Timestamp,
+    execute_ts: pd.Timestamp,
 ) -> Optional[PlannedTrade]:
     """
     Minimal, no-lookahead fallback used to make NEXT_OPEN robust on tiny toy datasets.
 
-    - LONG: last closed bar is bullish + closes near its high.
+    - LONG: signal bar is bullish + closes near its high.
       Stop: min(low) over last `p.pullback_bars` closed bars (incl signal) minus 1 tick.
-    - SHORT: last closed bar is bearish + closes near its low.
+    - SHORT: signal bar is bearish + closes near its low.
       Stop: max(high) over last `p.pullback_bars` closed bars (incl signal) plus 1 tick.
 
     This does NOT read any OHLC from the execute bar.
@@ -247,17 +247,8 @@ def _fallback_last_closed_bar_signal(
     if p.pullback_bars <= 0:
         return None
 
-    if len(m5) < 2:
-        return None
-
-    if current_bar_included:
-        signal_ts = m5.index[-2]
-        execute_ts = m5.index[-1]
-    else:
-        signal_ts = m5.index[-1]
-        execute_ts = signal_ts + pd.Timedelta(minutes=timeframe_minutes)
-
     if signal_ts not in m5.index:
+        logger.debug("NEXT_OPEN fallback: signal_ts not in m5 index: %s", signal_ts)
         return None
 
     bar = m5.loc[signal_ts]
@@ -265,6 +256,16 @@ def _fallback_last_closed_bar_signal(
     h = float(bar["high"])
     l = float(bar["low"])
     c = float(bar["close"])
+
+    logger.debug(
+        "NEXT_OPEN fallback: evaluate signal_ts=%s execute_ts=%s o=%.5f h=%.5f l=%.5f c=%.5f",
+        signal_ts,
+        execute_ts,
+        o,
+        h,
+        l,
+        c,
+    )
 
     if trend == Side.LONG:
         if not _close_near_high(o, h, l, c, p.signal_close_frac):
@@ -399,34 +400,34 @@ def plan_next_open_trade(
         return pick
 
     # 3) fallback: only if explicitly enabled via pullback_bars > 0 (tests do this)
-    fb = _fallback_last_closed_bar_signal(
-        m5,
-        trend=trend,
-        spec=spec,
-        p=p,
-        timeframe_minutes=timeframe_minutes,
-        current_bar_included=True,  # "try current-bar interpretation first" for fallback
-    )
-    if fb is None:
-        fb = _fallback_last_closed_bar_signal(
+    fallback_candidates: List[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    if allow_synthetic:
+        fallback_candidates.append(
+            ("closed-bars", last_ts, last_ts + pd.Timedelta(minutes=timeframe_minutes))
+        )
+    if len(m5) >= 2:
+        fallback_candidates.append(("current-bar", m5.index[-2], m5.index[-1]))
+
+    for label, signal_ts, execute_ts in fallback_candidates:
+        fb = _fallback_signal_at_ts(
             m5,
             trend=trend,
             spec=spec,
             p=p,
-            timeframe_minutes=timeframe_minutes,
-            current_bar_included=False,
+            signal_ts=signal_ts,
+            execute_ts=execute_ts,
         )
-
-    if fb is not None:
-        logger.info(
-            "NEXT_OPEN: selected (fallback) side=%s signal=%s exec=%s stop=%.5f reason=%s",
-            fb.side,
-            fb.signal_ts,
-            fb.execute_ts,
-            fb.stop,
-            fb.reason,
-        )
-        return fb
+        if fb is not None:
+            logger.info(
+                "NEXT_OPEN: selected (fallback-%s) side=%s signal=%s exec=%s stop=%.5f reason=%s",
+                label,
+                fb.side,
+                fb.signal_ts,
+                fb.execute_ts,
+                fb.stop,
+                fb.reason,
+            )
+            return fb
 
     logger.debug("NEXT_OPEN: no candidate found.")
     return None
