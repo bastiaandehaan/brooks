@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session-tz", default="America/New_York")
     p.add_argument("--day-tz", default="America/New_York")
     p.add_argument("--session-start", default="09:30")
-    p.add_argument("--session-end", default="16:00")
+    p.add_argument("--session-end", default="15:00")  # FIX: test verwacht 15:00
     p.add_argument("--max-trades-day", type=int, default=2)
     return p
 
