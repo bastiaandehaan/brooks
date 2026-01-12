@@ -1,8 +1,7 @@
 # execution/selection.py
 """
-Brooks Daily Selection - FIXED
-Oude bug: kleinste stop = hoogste score → stop-out bias
-Nieuwe regel: FIRST COME FIRST SERVED binnen session (chronologisch)
+Brooks Daily Selection - SILENT MODE
+Chronological selection without spam logging
 """
 from __future__ import annotations
 
@@ -28,7 +27,6 @@ class SelectionStats:
 def _as_utc_ts(ts: Any) -> pd.Timestamp:
     t = pd.Timestamp(ts)
     if t.tzinfo is None:
-        logger.debug("select: naive timestamp, assuming UTC: %s", t)
         t = t.tz_localize("UTC")
     else:
         t = t.tz_convert("UTC")
@@ -54,27 +52,20 @@ def select_top_per_ny_day(
         candidates: Iterable[Any],
         *,
         max_trades_day: int,
-        tick_size: float,  # kept for backwards compat, maar niet gebruikt
+        tick_size: float,
         tz_ny: str = NY_TZ,
-        log_daily: bool = True,
-        score_mode: str = "chronological",  # backwards compat, ignore
-        warn_on_bad_rows: bool = True,
+        log_daily: bool = False,  # DEFAULT FALSE NOW
+        score_mode: str = "chronological",
+        warn_on_bad_rows: bool = False,  # DEFAULT FALSE
 ) -> Tuple[List[Any], List[SelectionStats]]:
     """
-    Brooks Selection Rule - SIMPEL:
-
-    Neem eerste N trades per dag (chronologisch op signal_ts).
-    Waarom? Brooks: "Trade the first good setup you see. Don't wait for perfect."
-
-    Oude bug: selecteerde kleinste stops → stop-out bias.
-    Fix: chronologische volgorde = natuurlijke priority (eerste setups zijn vaak best).
+    Chronological selection (first come first served) - SILENT MODE
     """
     cand_list = list(candidates)
 
     if max_trades_day <= 0 or not cand_list:
         return [], []
 
-    # Group by NY day
     buckets: dict[pd.Timestamp, list[tuple[pd.Timestamp, Any]]] = {}
     bad_rows = 0
 
@@ -88,27 +79,18 @@ def select_top_per_ny_day(
 
             if not _is_finite(entry, stop):
                 bad_rows += 1
-                if warn_on_bad_rows:
-                    logger.warning("select: skipping non-finite entry/stop: %r", c)
                 continue
 
             if abs(entry - stop) <= 0:
                 bad_rows += 1
-                if warn_on_bad_rows:
-                    logger.warning("select: skipping zero risk: %r", c)
                 continue
 
             day_key = _ny_day(exec_utc, tz_ny)
             buckets.setdefault(day_key, []).append((sig_utc, c))
 
-        except Exception as e:
+        except Exception:
             bad_rows += 1
-            if warn_on_bad_rows:
-                logger.warning("select: skipping invalid candidate: %s", e)
             continue
-
-    if bad_rows and log_daily:
-        logger.info("selection: skipped_bad_rows=%d", bad_rows)
 
     selected: list[Any] = []
     stats: list[SelectionStats] = []
@@ -118,27 +100,26 @@ def select_top_per_ny_day(
         if not items:
             continue
 
-        # Sort chronologically (signal_ts asc)
         items.sort(key=lambda x: x[0])
-
-        # Take first N
         chosen = items[:max_trades_day]
         chosen_trades = [c for _sig, c in chosen]
         selected.extend(chosen_trades)
 
-        if log_daily:
-            st = SelectionStats(
-                ny_day=str(day_key.date()),
-                candidates=len(items),
-                selected=len(chosen_trades),
-                rejected=len(items) - len(chosen_trades),
-            )
-            stats.append(st)
+        stats.append(SelectionStats(
+            ny_day=str(day_key.date()),
+            candidates=len(items),
+            selected=len(chosen_trades),
+            rejected=len(items) - len(chosen_trades),
+        ))
 
-            logger.info(
-                "selection: ny_day=%s candidates=%d selected=%d rejected=%d (chronological order)",
-                st.ny_day, st.candidates, st.selected, st.rejected
-            )
+    # Summary only
+    total_selected = len(selected)
+    total_rejected = sum(s.rejected for s in stats)
+
+    logger.info(
+        "Daily selection: %d days, selected=%d, rejected=%d (bad_rows=%d)",
+        len(stats), total_selected, total_rejected, bad_rows
+    )
 
     return selected, stats
 
@@ -156,6 +137,6 @@ def select_top_trades_per_day(
         max_trades_day=max_per_day,
         tick_size=tick_size,
         tz_ny=day_tz,
-        log_daily=True,
+        log_daily=False,
     )
     return selected

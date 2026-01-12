@@ -28,6 +28,11 @@ import logging as _log
 
 _log.getLogger("execution.guardrails").setLevel(_log.WARNING)
 from execution.selection import select_top_per_ny_day
+
+# Suppress selection spam logging
+import logging as _log
+
+_log.getLogger("execution.selection").setLevel(_log.WARNING)
 from backtest.visualiser import generate_performance_report
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
