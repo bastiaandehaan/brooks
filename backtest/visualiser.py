@@ -1,3 +1,4 @@
+# backtest/visualiser.py
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -6,11 +7,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def generate_performance_report(results_r, equity_curve, drawdown, symbol, days):
+def generate_performance_report(results_r, equity_curve, drawdown, symbol=None, days=None):
     """
     Uitgebreid dashboard met Equity, Drawdown en Rolling Winrate.
-    Slaat op met bestandsnaam inclusief periode.
+    Backward compatible: symbol/days zijn optioneel.
     """
+    symbol = symbol or "UNKNOWN"
+    days = days or "NA"
+
     plt.style.use('ggplot')
     fig = plt.figure(figsize=(14, 14))
     gs = fig.add_gridspec(4, 1, height_ratios=[2, 1, 1, 1])
@@ -23,7 +27,6 @@ def generate_performance_report(results_r, equity_curve, drawdown, symbol, days)
     # 1. Equity Curve
     ax1.plot(equity_curve.values, label='Equity Growth (R)', color='#2ca02c', linewidth=2.5)
     ax1.fill_between(range(len(equity_curve)), equity_curve, color='#2ca02c', alpha=0.1)
-    # Titel bevat al de periode
     ax1.set_title(f'Brooks MVP Dashboard: {symbol} ({days} Days)', fontsize=16, fontweight='bold')
     ax1.set_ylabel('Cumulative R')
     ax1.grid(True, alpha=0.3)
@@ -54,11 +57,7 @@ def generate_performance_report(results_r, equity_curve, drawdown, symbol, days)
 
     plt.tight_layout()
 
-    # --- AANPASSING HIER ---
-    # Bestandsnaam is nu uniek per periode, bijv: backtest_report_US500.cash_180d.png
     filename = f"backtest_report_{symbol}_{days}d.png"
-    # -----------------------
-
     plt.savefig(filename, dpi=150)
     plt.close()
     logger.info(f"Dashboard '{filename}' opgeslagen.")

@@ -107,6 +107,13 @@ def plan_h2l2_trades(
     if len(m5) < 3:
         return []
 
+    # PERF: pull columns once into numpy arrays (avoid pandas row indexing in hot loop)
+    o_arr = m5["open"].to_numpy(dtype="float64", copy=False)
+    h_arr = m5["high"].to_numpy(dtype="float64", copy=False)
+    l_arr = m5["low"].to_numpy(dtype="float64", copy=False)
+    c_arr = m5["close"].to_numpy(dtype="float64", copy=False)
+    idx = m5.index  # timestamps
+
     trades: List[PlannedTrade] = []
     cooldown = 0
 
@@ -120,20 +127,18 @@ def plan_h2l2_trades(
             cooldown -= 1
             continue
 
-        bar = m5.iloc[i]
-        prev = m5.iloc[i - 1]
-        ts = m5.index[i]
-        next_ts = m5.index[i + 1]
+        ts = idx[i]
+        next_ts = idx[i + 1]
 
-        o = float(bar["open"])
-        h = float(bar["high"])
-        l = float(bar["low"])
-        c = float(bar["close"])
+        o = float(o_arr[i])
+        h = float(h_arr[i])
+        l = float(l_arr[i])
+        c = float(c_arr[i])
 
-        prev_h = float(prev["high"])
-        prev_l = float(prev["low"])
+        prev_h = float(h_arr[i - 1])
+        prev_l = float(l_arr[i - 1])
 
-        entry = float(m5.iloc[i + 1]["open"])
+        entry = float(o_arr[i + 1])
         if not np.isfinite(entry):
             # If someone passed a synthetic bar row with NaN open, we cannot compute entry here.
             continue

@@ -1,6 +1,7 @@
 # backtest/runner.py
 import sys
 import os
+import time
 import numpy as np
 import argparse
 import logging
@@ -14,95 +15,69 @@ sys.path.insert(0, root_dir)
 
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
-from strategies.context import infer_trend_m15, TrendParams, Trend
+from strategies.context import TrendParams, Trend, infer_trend_m15_series
 from strategies.h2l2 import plan_next_open_trade, H2L2Params, Side, PlannedTrade
 from execution.guardrails import Guardrails, apply_guardrails
+from execution.selection import select_top_per_ny_day
 from backtest.visualiser import generate_performance_report
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("Backtest")
 
-
 NY_TZ = "America/New_York"
 
 
+def _normalize_ohlc(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
+    """Sort index, drop duplicate timestamps, validate OHLC schema."""
+    required = {"open", "high", "low", "close"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{name}: missing columns: {sorted(missing)}")
+
+    out = df.sort_index()
+    out = out.loc[~out.index.duplicated(keep="first")]
+    return out
+
+
+def _format_eta(seconds: float) -> str:
+    if not np.isfinite(seconds) or seconds < 0:
+        return "?"
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    if m > 0:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
 def precalculate_trends(m15_df: pd.DataFrame, params: TrendParams) -> pd.DataFrame:
-    """Pre-calc trend series without look-ahead (uses only bars <= i)."""
-    logger.info("Trends pre-calculeren...")
-    trends = []
-    for i in range(len(m15_df)):
-        slice_df = m15_df.iloc[: i + 1]
-        trend, _ = infer_trend_m15(slice_df, params)
-        trends.append(trend)
-    m15_df = m15_df.copy()
-    m15_df["trend"] = trends
-    return m15_df[["trend"]]
-
-
-def trade_risk_price_units(t: PlannedTrade) -> float:
-    """Absolute risk in price units (entry-stop)."""
-    return float(abs(t.entry - t.stop))
-
-
-def score_trade(t: PlannedTrade) -> float:
     """
-    MVP score (no extra features available):
-    - prefer smaller risk (tighter stop) => higher score
+    Fast trend precalc (O(n)): uses infer_trend_m15_series once.
+    No look-ahead: ewm/rolling are causal.
     """
-    r = trade_risk_price_units(t)
-    if not np.isfinite(r) or r <= 0:
-        return -1e18
-    return -r  # smaller risk => higher score (less negative)
+    logger.info("Trends pre-calculeren (vectorized)...")
+    t0 = time.perf_counter()
+    trend_series = infer_trend_m15_series(m15_df, params)
+    out = pd.DataFrame({"trend": trend_series}, index=m15_df.index)
+    logger.info("Trend precalc done: bars=%d elapsed=%.3fs", len(out), time.perf_counter() - t0)
+    return out
 
 
-def select_top_trades_per_day(
-    trades: list[PlannedTrade],
-    *,
-    max_per_day: int,
-    day_tz: str = NY_TZ,
-) -> list[PlannedTrade]:
-    """
-    Deterministic selection:
-    - group by execute_ts NY day
-    - sort by score desc, then execute_ts asc (tie-breaker), then signal_ts asc
-    - keep top max_per_day per day
-    """
-    if not trades:
-        return []
-
-    # Ensure deterministic input order doesn't matter
-    s_exec = pd.Series([t.execute_ts for t in trades], dtype="datetime64[ns, UTC]")
-    days = s_exec.dt.tz_convert(day_tz).dt.date
-
-    grouped: dict[object, list[PlannedTrade]] = {}
-    for d, t in zip(days.tolist(), trades):
-        grouped.setdefault(d, []).append(t)
-
-    selected: list[PlannedTrade] = []
-    for d in sorted(grouped.keys()):
-        cand = grouped[d]
-        cand_sorted = sorted(
-            cand,
-            key=lambda t: (
-                -score_trade(t),                 # score desc (note: score is negative risk)
-                t.execute_ts.value,              # earliest execute
-                t.signal_ts.value,               # earliest signal
-            ),
-        )
-        pick = cand_sorted[:max_per_day]
-        logger.info(f"Selection {d}: candidates={len(cand)} selected={len(pick)}")
-        selected.extend(pick)
-
-    # Keep global chronological order
-    selected = sorted(selected, key=lambda t: (t.execute_ts.value, t.signal_ts.value))
-    return selected
+def _trend_to_side(trend: Trend) -> Side | None:
+    if trend == Trend.BULL:
+        return Side.LONG
+    if trend == Trend.BEAR:
+        return Side.SHORT
+    return None
 
 
 def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> float:
     """
     Simuleer trade outcome in R.
     Policy:
-      - execute bar telt mee (geen .iloc[1:] bias)
+      - execute bar telt mee
       - SL en TP in dezelfde bar => worst-case SL (-1R)
     """
     future = m5_data.loc[t.execute_ts:]  # INCLUDE execute bar
@@ -132,7 +107,10 @@ def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> float:
     return 0.0
 
 
-def run_backtest(symbol: str, days: int) -> None:
+def run_backtest(symbol: str, days: int, max_trades_day: int = 2) -> None:
+    if max_trades_day < 0:
+        raise ValueError("max_trades_day must be >= 0")
+
     client = Mt5Client(mt5_module=mt5)
     if not client.initialize():
         return
@@ -150,121 +128,178 @@ def run_backtest(symbol: str, days: int) -> None:
     m15_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M15, count_m15))
     m5_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M5, count_m5))
 
-    if m15_data is None or m5_data is None or m15_data.empty or m5_data.empty:
-        logger.error("Data error.")
+    if m15_data.empty or m5_data.empty:
+        logger.warning("Geen data opgehaald (m15=%d, m5=%d).", len(m15_data), len(m5_data))
         client.shutdown()
         return
 
-    trend_data = precalculate_trends(m15_data, TrendParams())
+    m15_data = _normalize_ohlc(m15_data, name="M15")
+    m5_data = _normalize_ohlc(m5_data, name="M5")
 
-    m5_with_trend = pd.merge_asof(
-        m5_data.sort_index(),
-        trend_data.sort_index(),
-        left_index=True,
-        right_index=True,
+    # Trends pre-calc (fast, no look-ahead)
+    m15_trends = precalculate_trends(m15_data, TrendParams())
+
+    # Merge trend into m5 timeline (asof backward)
+    trend_series = m15_trends.copy()
+    trend_series = trend_series.reset_index().rename(columns={"index": "ts"})
+    m5_ts = m5_data.reset_index().rename(columns={"index": "ts"})
+    merged = pd.merge_asof(
+        m5_ts.sort_values("ts"),
+        trend_series.sort_values("ts"),
+        on="ts",
         direction="backward",
     )
+    m5_data = m5_data.copy()
+    m5_data["trend"] = merged["trend"].values
 
-    strat_params = H2L2Params(
-        min_risk_price_units=1.0,
-        signal_close_frac=0.30,
-        pullback_bars=2,
-        cooldown_bars=0,
-    )
+    strat_params = H2L2Params()
+    planned_trades: list[PlannedTrade] = []
 
-    raw_trades: list[PlannedTrade] = []
-    start_idx = 200
-    logger.info(f"Simuleren van {len(m5_with_trend)} bars...")
+    # >>> MVP PERFORMANCE FIX: cap history passed into planner <<<
+    lookback_bars = 400  # tune later if needed; must cover your H2/L2 pattern needs
 
-    for i in range(start_idx, len(m5_with_trend)):
-        current_trend = m5_with_trend.iloc[i]["trend"]
-        if current_trend not in (Trend.BULL, Trend.BEAR):
+    logger.info("Planning trades over M5 bars...")
+    t_plan0 = time.perf_counter()
+
+    total_bars = len(m5_data)
+
+    # Start after some warmup
+    for i in range(50, total_bars - 1):
+        # Progress update every 250 bars
+        if i % 250 == 0 and i > 0:
+            elapsed = time.perf_counter() - t_plan0
+            bars_per_sec = i / elapsed if elapsed > 0 else 0.0
+            remaining = (total_bars - i)
+            eta_sec = (remaining / bars_per_sec) if bars_per_sec > 0 else float("inf")
+            pct = (i / total_bars) * 100.0
+
+            logger.info(
+                "planning: %5.1f%% i=%d/%d planned=%d speed=%.1f bars/s ETA=%s",
+                pct,
+                i,
+                total_bars,
+                len(planned_trades),
+                bars_per_sec,
+                _format_eta(eta_sec),
+            )
+
+        trend_val = m5_data.iloc[i]["trend"]
+        if pd.isna(trend_val):
             continue
 
-        side = Side.LONG if current_trend == Trend.BULL else Side.SHORT
-        m5_slice = m5_with_trend.iloc[i - 50 : i + 1]
+        side = _trend_to_side(trend_val)
+        if side is None:
+            continue
 
-        trade = plan_next_open_trade(m5_slice, side, spec, strat_params, timeframe_minutes=5)
-        if trade:
-            raw_trades.append(trade)
+        # Only bars up to (signal bar + next open bar), BUT cap lookback for speed
+        end = i + 2
+        start = max(0, end - lookback_bars)
+        m5_slice = m5_data.iloc[start:end]
 
-    logger.info(f"Ruwe signalen: {len(raw_trades)}")
+        # simulated "now" for backtest semantics (NEXT_OPEN)
+        simulated_now_utc = m5_slice.index[-1]
 
-    # 1) Session filter first (but don't cap here)
-    g_session_only = Guardrails(
-        max_trades_per_day=10_000,  # effectively off for this step
+        trade = plan_next_open_trade(
+            m5=m5_slice,
+            trend=side,
+            spec=spec,
+            p=strat_params,
+            timeframe_minutes=5,
+            now_utc=simulated_now_utc,
+        )
+        if trade is not None:
+            planned_trades.append(trade)
+
+    logger.info(
+        "Planning done: bars=%d elapsed=%.2fs planned=%d",
+        total_bars,
+        time.perf_counter() - t_plan0,
+        len(planned_trades),
+    )
+
+    logger.info("Planned trades: %d", len(planned_trades))
+
+    # Guardrails: session-only filter first (no max/day here)
+    g_session = Guardrails(
+        session_tz=NY_TZ,
+        day_tz=NY_TZ,
         session_start="09:30",
         session_end="15:00",
-        day_tz=NY_TZ,
-        session_tz=NY_TZ,
+        max_trades_per_day=10_000,
     )
-    in_session, rejected_session = apply_guardrails(raw_trades, g_session_only)
+    in_session, rejected1 = apply_guardrails(planned_trades, g_session)
+    logger.info("After session guardrails: %d (rejected: %d)", len(in_session), len(rejected1))
 
-    logger.info(f"Na session filter: {len(in_session)} (rejected={len(rejected_session)})")
+    # Deterministic daily selection (tick-quantized risk ordering)
+    selected, sel_stats = select_top_per_ny_day(
+        in_session,
+        max_trades_day=max_trades_day,
+        tick_size=float(spec.tick_size),
+    )
+    logger.info("After daily selection: %d (days logged: %d)", len(selected), len(sel_stats))
 
-    # 2) Deterministic selection: pick top-2 per NY day
-    selected = select_top_trades_per_day(in_session, max_per_day=2, day_tz=NY_TZ)
-
-    # 3) Apply final guardrails (cap still enforced; also catches any edge cases)
-    g_final = Guardrails(
-        max_trades_per_day=2,
+    # Final guardrails: enforce per-day + one-trade-per-timestamp
+    g_all = Guardrails(
+        session_tz=NY_TZ,
+        day_tz=NY_TZ,
         session_start="09:30",
         session_end="15:00",
-        day_tz=NY_TZ,
-        session_tz=NY_TZ,
+        max_trades_per_day=max_trades_day,
     )
-    accepted_trades, rejected_final = apply_guardrails(selected, g_final)
+    final_trades, rejected2 = apply_guardrails(selected, g_all)
+    logger.info("After final guardrails: %d (rejected: %d)", len(final_trades), len(rejected2))
 
-    logger.info(f"Trades na Selection: {len(selected)}")
-    logger.info(f"Trades na Guardrails: {len(accepted_trades)} (rejected={len(rejected_final)})")
+    logger.info(
+        "runner: candidates=%d after_session=%d after_selection=%d after_final=%d max_trades_day=%d",
+        len(planned_trades),
+        len(in_session),
+        len(selected),
+        len(final_trades),
+        max_trades_day,
+    )
 
-    if not accepted_trades:
-        logger.warning("Geen trades na guardrails.")
+    # Simulate outcomes in R
+    results_r: list[float] = []
+    for t in final_trades:
+        results_r.append(_simulate_trade_outcome(m5_data, t))
+
+    if not results_r:
+        logger.info("Geen trades uitgevoerd na filters/selection.")
         client.shutdown()
         return
 
-    results_r = []
-    for t in accepted_trades:
-        results_r.append(_simulate_trade_outcome(m5_data, t))
-
-    res_series = pd.Series(results_r)
-    equity_curve = res_series.cumsum()
+    res = pd.Series(results_r, dtype="float64")
+    equity_curve = res.cumsum()
     running_max = equity_curve.cummax()
     drawdown = equity_curve - running_max
+    max_dd = float(drawdown.min())
 
-    max_dd_depth = float(drawdown.min())
-    is_underwater = drawdown < 0
-    dd_groups = (is_underwater != is_underwater.shift()).cumsum()
-    max_dd_duration = int(is_underwater.groupby(dd_groups).sum().max()) if len(is_underwater) else 0
+    wins = res[res > 0].sum()
+    losses = -res[res < 0].sum()
+    profit_factor = float(wins / losses) if losses > 0 else float("inf")
 
-    sharpe = (res_series.mean() / res_series.std()) * np.sqrt(len(results_r)) if res_series.std() != 0 else 0.0
-    neg_sum = abs(sum([r for r in results_r if r < 0]))
-    pf = (sum([r for r in results_r if r > 0]) / neg_sum) if neg_sum > 0 else float("inf")
-    winrate = (res_series > 0).mean() * 100 if len(res_series) else 0.0
+    mean_r = float(res.mean())
+    std_r = float(res.std(ddof=1)) if len(res) > 1 else 0.0
+    sharpe = float(mean_r / std_r) if std_r > 0 else 0.0
 
-    generate_performance_report(results_r, equity_curve, drawdown, symbol, days)
+    logger.info(
+        "RESULTS: trades=%d netR=%.2f PF=%.2f maxDD=%.2f sharpe=%.2f",
+        len(res),
+        float(equity_curve.iloc[-1]),
+        profit_factor,
+        max_dd,
+        sharpe,
+    )
 
-    print("\n" + "=" * 45)
-    print(f" FINAL OPTIMIZED REPORT: {symbol}")
-    print("=" * 45)
-    print(f"Periode              : {days} dagen")
-    print(f"Totaal Trades        : {len(results_r)}")
-    print(f"Winrate              : {winrate:.1f}%")
-    print("-" * 45)
-    print(f"Netto Resultaat      : {equity_curve.iloc[-1]:.2f} R")
-    print("Profit Factor        : inf" if pf == float("inf") else f"Profit Factor        : {pf:.2f}")
-    print(f"Sharpe Ratio         : {sharpe:.2f}")
-    print("-" * 45)
-    print(f"Max Drawdown (Diepte): {max_dd_depth:.2f} R")
-    print(f"Max Drawdown (Duur)  : {max_dd_duration} trades")
-    print("=" * 45)
-
+    generate_performance_report(results_r, equity_curve, drawdown)
     client.shutdown()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--symbol", type=str, default="US500.cash")
+    parser.add_argument("--days", type=int, default=10)
+    parser.add_argument("--max-trades-day", type=int, default=2)
     args = parser.parse_args()
-    run_backtest(args.symbol, args.days)
+
+    run_backtest(args.symbol, args.days, max_trades_day=args.max_trades_day)

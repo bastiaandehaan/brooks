@@ -88,3 +88,55 @@ def infer_trend_m15(m15: pd.DataFrame, p: TrendParams) -> tuple[Optional[Trend],
         return Trend.BEAR, metrics
 
     return None, metrics
+
+
+def infer_trend_m15_series(m15: pd.DataFrame, p: TrendParams) -> pd.Series:
+    """
+    Vectorized trend inference per bar (O(n)).
+    Returns Series aligned to m15.index with values: Trend.BULL / Trend.BEAR / None.
+
+    Important:
+    - No look-ahead: each bar's values depend only on <= that bar (rolling/ewm).
+    - Does NOT change infer_trend_m15 behavior; it's an additional helper for runners/backtests.
+    """
+    if m15.empty:
+        return pd.Series([], dtype="object", index=m15.index)
+
+    close = m15["close"].astype(float)
+    ema = close.ewm(span=p.ema_period, adjust=False).mean()
+
+    last_close_minus_ema = close - ema
+    dist = last_close_minus_ema.abs()
+
+    slope = ema - ema.shift(p.slope_lookback)
+
+    w = p.confirm_bars
+    above_frac = (close > ema).rolling(w).mean()
+    below_frac = (close < ema).rolling(w).mean()
+
+    bull_ok = (
+        (slope >= p.min_slope)
+        & (above_frac >= p.min_above_frac)
+        & (dist >= p.min_close_ema_dist)
+        & ((last_close_minus_ema >= 0) | (last_close_minus_ema.abs() <= p.pullback_allowance))
+    )
+
+    bear_ok = (
+        (slope <= -p.min_slope)
+        & (below_frac >= p.min_above_frac)
+        & (dist >= p.min_close_ema_dist)
+        & ((last_close_minus_ema <= 0) | (last_close_minus_ema.abs() <= p.pullback_allowance))
+    )
+
+    out = pd.Series([None] * len(m15), index=m15.index, dtype="object")
+    out[bull_ok & ~bear_ok] = Trend.BULL
+    out[bear_ok & ~bull_ok] = Trend.BEAR
+
+    # same warmup rule as infer_trend_m15
+    need = max(p.ema_period, p.slope_lookback, p.confirm_bars) + 2
+    if len(out) < need:
+        out[:] = None
+    else:
+        out.iloc[: need - 1] = None
+
+    return out
