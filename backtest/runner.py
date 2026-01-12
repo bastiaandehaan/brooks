@@ -1,4 +1,8 @@
 # backtest/runner.py
+"""
+Brooks Backtest Runner - INTELLIGENT OUTPUT
+Clean metrics, multi-timeframe support, strategy focus
+"""
 import sys
 import os
 import time
@@ -7,8 +11,8 @@ import argparse
 import logging
 import pandas as pd
 import MetaTrader5 as mt5
+from typing import Dict, Any
 
-# Pad fix
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.insert(0, root_dir)
@@ -16,8 +20,13 @@ sys.path.insert(0, root_dir)
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
 from strategies.context import TrendParams, Trend, infer_trend_m15_series
-from strategies.h2l2 import plan_next_open_trade, H2L2Params, Side, PlannedTrade
+from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side, PlannedTrade
 from execution.guardrails import Guardrails, apply_guardrails
+
+# Suppress guardrail spam logging
+import logging as _log
+
+_log.getLogger("execution.guardrails").setLevel(_log.WARNING)
 from execution.selection import select_top_per_ny_day
 from backtest.visualiser import generate_performance_report
 
@@ -28,7 +37,6 @@ NY_TZ = "America/New_York"
 
 
 def _normalize_ohlc(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
-    """Sort index, drop duplicate timestamps, validate OHLC schema."""
     required = {"open", "high", "low", "close"}
     missing = required - set(df.columns)
     if missing:
@@ -39,29 +47,12 @@ def _normalize_ohlc(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
     return out
 
 
-def _format_eta(seconds: float) -> str:
-    if not np.isfinite(seconds) or seconds < 0:
-        return "?"
-    s = int(seconds)
-    m, s = divmod(s, 60)
-    h, m = divmod(m, 60)
-    if h > 0:
-        return f"{h}h{m:02d}m"
-    if m > 0:
-        return f"{m}m{s:02d}s"
-    return f"{s}s"
-
-
 def precalculate_trends(m15_df: pd.DataFrame, params: TrendParams) -> pd.DataFrame:
-    """
-    Fast trend precalc (O(n)): uses infer_trend_m15_series once.
-    No look-ahead: ewm/rolling are causal.
-    """
-    logger.info("Trends pre-calculeren (vectorized)...")
+    logger.info("→ Calculating trends (vectorized)...")
     t0 = time.perf_counter()
     trend_series = infer_trend_m15_series(m15_df, params)
     out = pd.DataFrame({"trend": trend_series}, index=m15_df.index)
-    logger.info("Trend precalc done: bars=%d elapsed=%.3fs", len(out), time.perf_counter() - t0)
+    logger.info("  Trend calc: %.2fs", time.perf_counter() - t0)
     return out
 
 
@@ -74,13 +65,7 @@ def _trend_to_side(trend: Trend) -> Side | None:
 
 
 def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> float:
-    """
-    Simuleer trade outcome in R.
-    Policy:
-      - execute bar telt mee
-      - SL en TP in dezelfde bar => worst-case SL (-1R)
-    """
-    future = m5_data.loc[t.execute_ts:]  # INCLUDE execute bar
+    future = m5_data.loc[t.execute_ts:]
     for _, bar in future.iterrows():
         high = float(bar["high"])
         low = float(bar["low"])
@@ -103,43 +88,68 @@ def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> float:
                 return -1.0
             if hit_tp:
                 return 2.0
-
     return 0.0
 
 
-def run_backtest(symbol: str, days: int, max_trades_day: int = 2) -> None:
-    if max_trades_day < 0:
-        raise ValueError("max_trades_day must be >= 0")
-
+def run_backtest(
+        symbol: str,
+        days: int,
+        max_trades_day: int = 2,
+        # STRATEGY PARAMS (expose for grid search)
+        min_slope: float = 0.15,
+        ema_period: int = 20,
+        pullback_bars: int = 3,
+        signal_close_frac: float = 0.30,
+        stop_buffer: float = 2.0,
+        min_risk_price_units: float = 2.0,
+        cooldown_bars: int = 10,
+) -> Dict[str, Any]:
+    """
+    Returns metrics dict for grid search compatibility.
+    """
     client = Mt5Client(mt5_module=mt5)
     if not client.initialize():
-        return
+        return {"error": "MT5 init failed"}
 
     spec = client.get_symbol_specification(symbol)
     if not spec:
         client.shutdown()
-        return
+        return {"error": "Symbol not found"}
 
-    logger.info(f"--- OPTIMIZED BACKTEST: {symbol} ({days} days) ---")
+    print("\n" + "=" * 80)
+    print(f"  BROOKS BACKTEST: {symbol} ({days} days)")
+    print("=" * 80)
+    print(f"\n📊 STRATEGY PARAMETERS:")
+    print(f"  Context    : min_slope={min_slope:.2f}, ema_period={ema_period}")
+    print(f"  H2/L2      : pullback={pullback_bars}, close_frac={signal_close_frac:.2f}")
+    print(f"  Risk       : stop_buffer={stop_buffer:.1f}, min_risk={min_risk_price_units:.1f}")
+    print(f"  Execution  : cooldown={cooldown_bars}bars, max_trades_day={max_trades_day}")
+    print()
 
     count_m5 = days * 288
-    count_m15 = days * 96 * 2  # extra trend-history
+    count_m15 = days * 96 * 2
 
+    logger.info("→ Fetching data...")
     m15_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M15, count_m15))
     m5_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M5, count_m5))
 
     if m15_data.empty or m5_data.empty:
-        logger.warning("Geen data opgehaald (m15=%d, m5=%d).", len(m15_data), len(m5_data))
+        logger.warning("Empty data!")
         client.shutdown()
-        return
+        return {"error": "Empty data"}
 
     m15_data = _normalize_ohlc(m15_data, name="M15")
     m5_data = _normalize_ohlc(m5_data, name="M5")
 
-    # Trends pre-calc (fast, no look-ahead)
-    m15_trends = precalculate_trends(m15_data, TrendParams())
+    logger.info("  M15: %d bars, M5: %d bars", len(m15_data), len(m5_data))
 
-    # Merge trend into m5 timeline (asof backward)
+    # Trends
+    m15_trends = precalculate_trends(
+        m15_data,
+        TrendParams(min_slope=min_slope, ema_period=ema_period)
+    )
+
+    # Merge
     trend_series = m15_trends.copy()
     trend_series = trend_series.reset_index().rename(columns={"index": "ts"})
     m5_ts = m5_data.reset_index().rename(columns={"index": "ts"})
@@ -152,74 +162,69 @@ def run_backtest(symbol: str, days: int, max_trades_day: int = 2) -> None:
     m5_data = m5_data.copy()
     m5_data["trend"] = merged["trend"].values
 
-    strat_params = H2L2Params()
+    # Trend distribution
+    trend_counts = m5_data["trend"].value_counts()
+    bull_bars = trend_counts.get(Trend.BULL, 0)
+    bear_bars = trend_counts.get(Trend.BEAR, 0)
+    none_bars = m5_data["trend"].isna().sum()
+
+    print(f"📈 TREND DISTRIBUTION:")
+    print(f"  Bull  : {bull_bars:5d} bars ({bull_bars / len(m5_data) * 100:5.1f}%)")
+    print(f"  Bear  : {bear_bars:5d} bars ({bear_bars / len(m5_data) * 100:5.1f}%)")
+    print(f"  Range : {none_bars:5d} bars ({none_bars / len(m5_data) * 100:5.1f}%)")
+    print()
+
+    # Strategy params
+    strat_params = H2L2Params(
+        pullback_bars=pullback_bars,
+        signal_close_frac=signal_close_frac,
+        min_risk_price_units=min_risk_price_units,
+        stop_buffer=stop_buffer,
+        cooldown_bars=cooldown_bars,
+    )
+
     planned_trades: list[PlannedTrade] = []
 
-    # >>> MVP PERFORMANCE FIX: cap history passed into planner <<<
-    lookback_bars = 400  # tune later if needed; must cover your H2/L2 pattern needs
-
-    logger.info("Planning trades over M5 bars...")
+    logger.info("→ Planning trades (segment-based)...")
     t_plan0 = time.perf_counter()
 
     total_bars = len(m5_data)
 
-    # Start after some warmup
-    for i in range(50, total_bars - 1):
-        # Progress update every 250 bars
-        if i % 250 == 0 and i > 0:
-            elapsed = time.perf_counter() - t_plan0
-            bars_per_sec = i / elapsed if elapsed > 0 else 0.0
-            remaining = (total_bars - i)
-            eta_sec = (remaining / bars_per_sec) if bars_per_sec > 0 else float("inf")
-            pct = (i / total_bars) * 100.0
+    # Segment-based
+    segments = []
+    current_trend = None
+    segment_start = 50
 
-            logger.info(
-                "planning: %5.1f%% i=%d/%d planned=%d speed=%.1f bars/s ETA=%s",
-                pct,
-                i,
-                total_bars,
-                len(planned_trades),
-                bars_per_sec,
-                _format_eta(eta_sec),
-            )
-
+    for i in range(50, total_bars):
         trend_val = m5_data.iloc[i]["trend"]
-        if pd.isna(trend_val):
-            continue
+        side = _trend_to_side(trend_val) if not pd.isna(trend_val) else None
 
-        side = _trend_to_side(trend_val)
-        if side is None:
-            continue
+        if side != current_trend:
+            if current_trend is not None and segment_start < i:
+                segments.append((segment_start, i, current_trend))
+            current_trend = side
+            segment_start = i
 
-        # Only bars up to (signal bar + next open bar), BUT cap lookback for speed
-        end = i + 2
-        start = max(0, end - lookback_bars)
-        m5_slice = m5_data.iloc[start:end]
+    if current_trend is not None and segment_start < total_bars:
+        segments.append((segment_start, total_bars, current_trend))
 
-        # simulated "now" for backtest semantics (NEXT_OPEN)
-        simulated_now_utc = m5_slice.index[-1]
+    for seg_idx, (start_idx, end_idx, trend_side) in enumerate(segments):
+        lookback_start = max(0, start_idx - 10)
+        segment_data = m5_data.iloc[lookback_start:end_idx]
 
-        trade = plan_next_open_trade(
-            m5=m5_slice,
-            trend=side,
-            spec=spec,
-            p=strat_params,
-            timeframe_minutes=5,
-            now_utc=simulated_now_utc,
-        )
-        if trade is not None:
-            planned_trades.append(trade)
+        trades = plan_h2l2_trades(segment_data, trend_side, spec, strat_params)
 
-    logger.info(
-        "Planning done: bars=%d elapsed=%.2fs planned=%d",
-        total_bars,
-        time.perf_counter() - t_plan0,
-        len(planned_trades),
-    )
+        segment_start_ts = m5_data.index[start_idx]
+        for t in trades:
+            if t.execute_ts >= segment_start_ts:
+                planned_trades.append(t)
 
-    logger.info("Planned trades: %d", len(planned_trades))
+    planning_time = time.perf_counter() - t_plan0
+    logger.info("  Planning: %.2fs, %d segments → %d candidates",
+                planning_time, len(segments), len(planned_trades))
 
-    # Guardrails: session-only filter first (no max/day here)
+    # Guardrails (silent mode)
+    logger.info("→ Applying guardrails (session + daily limit)...")
     g_session = Guardrails(
         session_tz=NY_TZ,
         day_tz=NY_TZ,
@@ -228,17 +233,13 @@ def run_backtest(symbol: str, days: int, max_trades_day: int = 2) -> None:
         max_trades_per_day=10_000,
     )
     in_session, rejected1 = apply_guardrails(planned_trades, g_session)
-    logger.info("After session guardrails: %d (rejected: %d)", len(in_session), len(rejected1))
 
-    # Deterministic daily selection (tick-quantized risk ordering)
     selected, sel_stats = select_top_per_ny_day(
         in_session,
         max_trades_day=max_trades_day,
         tick_size=float(spec.tick_size),
     )
-    logger.info("After daily selection: %d (days logged: %d)", len(selected), len(sel_stats))
 
-    # Final guardrails: enforce per-day + one-trade-per-timestamp
     g_all = Guardrails(
         session_tz=NY_TZ,
         day_tz=NY_TZ,
@@ -247,32 +248,39 @@ def run_backtest(symbol: str, days: int, max_trades_day: int = 2) -> None:
         max_trades_per_day=max_trades_day,
     )
     final_trades, rejected2 = apply_guardrails(selected, g_all)
-    logger.info("After final guardrails: %d (rejected: %d)", len(final_trades), len(rejected2))
 
-    logger.info(
-        "runner: candidates=%d after_session=%d after_selection=%d after_final=%d max_trades_day=%d",
-        len(planned_trades),
-        len(in_session),
-        len(selected),
-        len(final_trades),
-        max_trades_day,
-    )
+    print(f"🔍 TRADE PIPELINE:")
+    print(f"  Candidates    : {len(planned_trades):4d}")
+    print(f"  In session    : {len(in_session):4d} (rejected: {len(rejected1)})")
+    print(f"  After select  : {len(selected):4d} (days: {len(sel_stats)})")
+    print(f"  Final         : {len(final_trades):4d}")
+    print()
 
-    # Simulate outcomes in R
+    # Simulate
     results_r: list[float] = []
     for t in final_trades:
         results_r.append(_simulate_trade_outcome(m5_data, t))
 
     if not results_r:
-        logger.info("Geen trades uitgevoerd na filters/selection.")
+        logger.info("⚠️  No trades executed.")
         client.shutdown()
-        return
+        return {"error": "No trades"}
 
     res = pd.Series(results_r, dtype="float64")
     equity_curve = res.cumsum()
     running_max = equity_curve.cummax()
     drawdown = equity_curve - running_max
     max_dd = float(drawdown.min())
+
+    # DD duration
+    dd_bars = 0
+    max_dd_bars = 0
+    for dd_val in drawdown:
+        if dd_val < 0:
+            dd_bars += 1
+            max_dd_bars = max(max_dd_bars, dd_bars)
+        else:
+            dd_bars = 0
 
     wins = res[res > 0].sum()
     losses = -res[res < 0].sum()
@@ -282,24 +290,93 @@ def run_backtest(symbol: str, days: int, max_trades_day: int = 2) -> None:
     std_r = float(res.std(ddof=1)) if len(res) > 1 else 0.0
     sharpe = float(mean_r / std_r) if std_r > 0 else 0.0
 
-    logger.info(
-        "RESULTS: trades=%d netR=%.2f PF=%.2f maxDD=%.2f sharpe=%.2f",
-        len(res),
-        float(equity_curve.iloc[-1]),
-        profit_factor,
-        max_dd,
-        sharpe,
-    )
+    winrate = float((res > 0).sum() / len(res)) if len(res) else 0.0
 
-    generate_performance_report(results_r, equity_curve, drawdown)
+    # Side breakdown
+    long_trades = [t for t in final_trades if t.side == Side.LONG]
+    short_trades = [t for t in final_trades if t.side == Side.SHORT]
+
+    long_results = [r for t, r in zip(final_trades, results_r) if t.side == Side.LONG]
+    short_results = [r for t, r in zip(final_trades, results_r) if t.side == Side.SHORT]
+
+    long_wr = sum(1 for r in long_results if r > 0) / len(long_results) if long_results else 0
+    short_wr = sum(1 for r in short_results if r > 0) / len(short_results) if short_results else 0
+
+    # Output
+    print("=" * 80)
+    print("  📊 RESULTS")
+    print("=" * 80)
+    print(f"\n💰 PERFORMANCE:")
+    print(f"  Trades        : {len(res):4d}")
+    print(f"  Net R         : {float(equity_curve.iloc[-1]):+7.2f}R")
+    print(f"  Avg R/trade   : {mean_r:+7.4f}R")
+    print(f"  Sharpe Ratio  : {sharpe:7.3f}")
+    print(f"  Profit Factor : {profit_factor:7.2f}")
+
+    print(f"\n📈 WIN/LOSS:")
+    print(f"  Winrate       : {winrate * 100:6.2f}%")
+    print(f"  Winners       : {int((res > 0).sum()):4d} ({int((res > 0).sum()) / len(res) * 100:5.1f}%)")
+    print(f"  Losers        : {int((res < 0).sum()):4d} ({int((res < 0).sum()) / len(res) * 100:5.1f}%)")
+    print(f"  Breakeven     : {int((res == 0).sum()):4d}")
+
+    print(f"\n📉 DRAWDOWN:")
+    print(f"  Max DD        : {max_dd:7.2f}R")
+    print(f"  Max DD bars   : {max_dd_bars:4d} trades")
+    print(f"  DD % of equity: {abs(max_dd) / float(equity_curve.iloc[-1]) * 100:6.2f}%")
+
+    print(f"\n⚖️  SIDE BREAKDOWN:")
+    print(f"  Long trades   : {len(long_trades):4d} (WR: {long_wr * 100:5.1f}%)")
+    print(f"  Short trades  : {len(short_trades):4d} (WR: {short_wr * 100:5.1f}%)")
+
+    print(f"\n⏱️  PERFORMANCE:")
+    print(f"  Planning      : {planning_time:6.2f}s")
+    print(f"  Bars/second   : {total_bars / planning_time:8.1f}")
+
+    print("\n" + "=" * 80 + "\n")
+
+    generate_performance_report(results_r, equity_curve, drawdown, symbol=symbol, days=days)
     client.shutdown()
+
+    return {
+        "days": days,
+        "trades": len(res),
+        "net_r": float(equity_curve.iloc[-1]),
+        "winrate": winrate,
+        "sharpe": sharpe,
+        "profit_factor": profit_factor,
+        "max_dd": max_dd,
+        "avg_r": mean_r,
+        "long_wr": long_wr,
+        "short_wr": short_wr,
+    }
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", type=str, default="US500.cash")
-    parser.add_argument("--days", type=int, default=10)
+    parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--max-trades-day", type=int, default=2)
+
+    # Strategy params (for grid search)
+    parser.add_argument("--min-slope", type=float, default=0.15)
+    parser.add_argument("--ema-period", type=int, default=20)
+    parser.add_argument("--pullback-bars", type=int, default=3)
+    parser.add_argument("--signal-close-frac", type=float, default=0.30)
+    parser.add_argument("--stop-buffer", type=float, default=2.0)
+    parser.add_argument("--min-risk", type=float, default=2.0)
+    parser.add_argument("--cooldown", type=int, default=10)
+
     args = parser.parse_args()
 
-    run_backtest(args.symbol, args.days, max_trades_day=args.max_trades_day)
+    run_backtest(
+        args.symbol,
+        args.days,
+        max_trades_day=args.max_trades_day,
+        min_slope=args.min_slope,
+        ema_period=args.ema_period,
+        pullback_bars=args.pullback_bars,
+        signal_close_frac=args.signal_close_frac,
+        stop_buffer=args.stop_buffer,
+        min_risk_price_units=args.min_risk,
+        cooldown_bars=args.cooldown,
+    )
