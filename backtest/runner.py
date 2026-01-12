@@ -1,7 +1,7 @@
 # backtest/runner.py
 """
-Brooks Backtest Runner - INTELLIGENT OUTPUT
-Clean metrics, multi-timeframe support, strategy focus
+Brooks Backtest Runner - WITH REGIME FILTER
+Skip choppy days, only trade trending markets
 """
 import sys
 import os
@@ -21,6 +21,7 @@ from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
 from strategies.context import TrendParams, Trend, infer_trend_m15_series
 from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side, PlannedTrade
+from strategies.regime import RegimeParams, detect_regime_series, MarketRegime  # NEW!
 from execution.guardrails import Guardrails, apply_guardrails
 
 # Suppress guardrail spam logging
@@ -30,8 +31,6 @@ _log.getLogger("execution.guardrails").setLevel(_log.WARNING)
 from execution.selection import select_top_per_ny_day
 
 # Suppress selection spam logging
-import logging as _log
-
 _log.getLogger("execution.selection").setLevel(_log.WARNING)
 from backtest.visualiser import generate_performance_report
 
@@ -58,6 +57,51 @@ def precalculate_trends(m15_df: pd.DataFrame, params: TrendParams) -> pd.DataFra
     trend_series = infer_trend_m15_series(m15_df, params)
     out = pd.DataFrame({"trend": trend_series}, index=m15_df.index)
     logger.info("  Trend calc: %.2fs", time.perf_counter() - t0)
+    return out
+
+
+def precalculate_regime(
+        m15_df: pd.DataFrame,
+        params: RegimeParams
+) -> pd.DataFrame:
+    """
+    Calculate regime for each M15 bar (rolling window)
+
+    Returns DataFrame with columns:
+    - regime: TRENDING/CHOPPY/UNKNOWN
+    - chop_ratio: float
+    """
+    logger.info("→ Calculating market regime (rolling)...")
+    t0 = time.perf_counter()
+
+    regimes = []
+    chop_ratios = []
+
+    # Need enough bars for ATR + range calculation
+    min_required = params.atr_period + params.range_period  # 14 + 20 = 34 bars minimum
+
+    for i in range(len(m15_df)):
+        # Use expanding window (from start to current bar)
+        # This gives regime context based on ALL history up to this point
+        if i < min_required:
+            regimes.append(MarketRegime.UNKNOWN)
+            chop_ratios.append(0.0)
+        else:
+            # Take last N bars (enough for calculation)
+            # Use 100 bars lookback for stable regime detection
+            lookback = min(100, i + 1)
+            window = m15_df.iloc[i - lookback + 1:i + 1]
+
+            regime, metrics = detect_regime(window, params)
+            regimes.append(regime)
+            chop_ratios.append(metrics.chop_ratio)
+
+    out = pd.DataFrame({
+        "regime": regimes,
+        "chop_ratio": chop_ratios
+    }, index=m15_df.index)
+
+    logger.info("  Regime calc: %.2fs", time.perf_counter() - t0)
     return out
 
 
@@ -100,7 +144,7 @@ def run_backtest(
         symbol: str,
         days: int,
         max_trades_day: int = 2,
-        # STRATEGY PARAMS (expose for grid search)
+        # STRATEGY PARAMS
         min_slope: float = 0.15,
         ema_period: int = 20,
         pullback_bars: int = 3,
@@ -108,9 +152,12 @@ def run_backtest(
         stop_buffer: float = 2.0,
         min_risk_price_units: float = 2.0,
         cooldown_bars: int = 10,
+        # NEW: REGIME FILTER
+        regime_filter: bool = False,
+        chop_threshold: float = 2.5,
 ) -> Dict[str, Any]:
     """
-    Returns metrics dict for grid search compatibility.
+    Backtest with optional regime filter
     """
     client = Mt5Client(mt5_module=mt5)
     if not client.initialize():
@@ -123,6 +170,10 @@ def run_backtest(
 
     print("\n" + "=" * 80)
     print(f"  BROOKS BACKTEST: {symbol} ({days} days)")
+    if regime_filter:
+        print(f"  🔍 REGIME FILTER: ENABLED (chop_threshold={chop_threshold})")
+    else:
+        print(f"  ⚠️  REGIME FILTER: DISABLED")
     print("=" * 80)
     print(f"\n📊 STRATEGY PARAMETERS:")
     print(f"  Context    : min_slope={min_slope:.2f}, ema_period={ema_period}")
@@ -148,13 +199,46 @@ def run_backtest(
 
     logger.info("  M15: %d bars, M5: %d bars", len(m15_data), len(m5_data))
 
+    # NEW: Calculate Regime (if enabled) - VECTORIZED!
+    regime_data = None
+    if regime_filter:
+        logger.info("→ Calculating market regime (vectorized)...")
+        t0 = time.perf_counter()
+
+        regime_params = RegimeParams(chop_threshold=chop_threshold)
+        regime_series = detect_regime_series(m15_data, regime_params)
+
+        # Calculate chop_ratio for stats (optional)
+        high = m15_data["high"].astype(float)
+        low = m15_data["low"].astype(float)
+        close = m15_data["close"].astype(float)
+
+        bar_range = high - low
+        atr = bar_range.rolling(regime_params.atr_period, min_periods=regime_params.atr_period).mean()
+        avg_atr = atr.rolling(regime_params.range_period, min_periods=regime_params.range_period).mean()
+
+        range_high = close.rolling(regime_params.range_period, min_periods=regime_params.range_period).max()
+        range_low = close.rolling(regime_params.range_period, min_periods=regime_params.range_period).min()
+        price_range = range_high - range_low
+
+        threshold_range = regime_params.chop_threshold * avg_atr
+        chop_ratio = price_range / threshold_range
+        chop_ratio = chop_ratio.fillna(0.0)  # Fill NaN with 0
+
+        regime_data = pd.DataFrame({
+            "regime": regime_series,
+            "chop_ratio": chop_ratio
+        }, index=m15_data.index)
+
+        logger.info("  Regime calc: %.2fs", time.perf_counter() - t0)
+
     # Trends
     m15_trends = precalculate_trends(
         m15_data,
         TrendParams(min_slope=min_slope, ema_period=ema_period)
     )
 
-    # Merge
+    # Merge trends to M5
     trend_series = m15_trends.copy()
     trend_series = trend_series.reset_index().rename(columns={"index": "ts"})
     m5_ts = m5_data.reset_index().rename(columns={"index": "ts"})
@@ -167,6 +251,18 @@ def run_backtest(
     m5_data = m5_data.copy()
     m5_data["trend"] = merged["trend"].values
 
+    # NEW: Merge regime to M5 (if enabled)
+    if regime_filter and regime_data is not None:
+        regime_series = regime_data.reset_index().rename(columns={"index": "ts"})
+        merged_regime = pd.merge_asof(
+            m5_ts.sort_values("ts"),
+            regime_series.sort_values("ts"),
+            on="ts",
+            direction="backward",
+        )
+        m5_data["regime"] = merged_regime["regime"].values
+        m5_data["chop_ratio"] = merged_regime["chop_ratio"].values
+
     # Trend distribution
     trend_counts = m5_data["trend"].value_counts()
     bull_bars = trend_counts.get(Trend.BULL, 0)
@@ -177,6 +273,19 @@ def run_backtest(
     print(f"  Bull  : {bull_bars:5d} bars ({bull_bars / len(m5_data) * 100:5.1f}%)")
     print(f"  Bear  : {bear_bars:5d} bars ({bear_bars / len(m5_data) * 100:5.1f}%)")
     print(f"  Range : {none_bars:5d} bars ({none_bars / len(m5_data) * 100:5.1f}%)")
+
+    # NEW: Regime distribution (if enabled)
+    if regime_filter:
+        regime_counts = m5_data["regime"].value_counts()
+        trending_bars = regime_counts.get(MarketRegime.TRENDING, 0)
+        choppy_bars = regime_counts.get(MarketRegime.CHOPPY, 0)
+        unknown_bars = regime_counts.get(MarketRegime.UNKNOWN, 0)
+
+        print(f"\n🔍 REGIME DISTRIBUTION:")
+        print(f"  Trending : {trending_bars:5d} bars ({trending_bars / len(m5_data) * 100:5.1f}%)")
+        print(f"  Choppy   : {choppy_bars:5d} bars ({choppy_bars / len(m5_data) * 100:5.1f}%)")
+        print(f"  Unknown  : {unknown_bars:5d} bars ({unknown_bars / len(m5_data) * 100:5.1f}%)")
+
     print()
 
     # Strategy params
@@ -190,30 +299,58 @@ def run_backtest(
 
     planned_trades: list[PlannedTrade] = []
 
-    logger.info("→ Planning trades (segment-based)...")
+    logger.info("→ Planning trades (segment-based with regime filter)...")
     t_plan0 = time.perf_counter()
 
     total_bars = len(m5_data)
 
-    # Segment-based
+    # Segment-based (with regime awareness)
     segments = []
     current_trend = None
+    current_regime = None
     segment_start = 50
 
     for i in range(50, total_bars):
         trend_val = m5_data.iloc[i]["trend"]
         side = _trend_to_side(trend_val) if not pd.isna(trend_val) else None
 
-        if side != current_trend:
+        # NEW: Check regime
+        regime_val = None
+        if regime_filter:
+            regime_val = m5_data.iloc[i].get("regime", MarketRegime.UNKNOWN)
+
+        # Segment breaks on:
+        # 1. Trend change
+        # 2. Regime change (if filter enabled)
+        should_break = (side != current_trend)
+        if regime_filter:
+            should_break = should_break or (regime_val != current_regime)
+
+        if should_break:
             if current_trend is not None and segment_start < i:
-                segments.append((segment_start, i, current_trend))
+                segments.append((segment_start, i, current_trend, current_regime))
             current_trend = side
+            current_regime = regime_val
             segment_start = i
 
     if current_trend is not None and segment_start < total_bars:
-        segments.append((segment_start, total_bars, current_trend))
+        segments.append((segment_start, total_bars, current_trend, current_regime))
 
-    for seg_idx, (start_idx, end_idx, trend_side) in enumerate(segments):
+    # NEW: Track skipped segments
+    skipped_choppy = 0
+    processed_segments = 0
+
+    for seg_idx, (start_idx, end_idx, trend_side, regime_val) in enumerate(segments):
+        # NEW: Skip if regime is CHOPPY
+        if regime_filter and regime_val == MarketRegime.CHOPPY:
+            skipped_choppy += 1
+            continue
+
+        if trend_side is None:
+            continue
+
+        processed_segments += 1
+
         lookback_start = max(0, start_idx - 10)
         segment_data = m5_data.iloc[lookback_start:end_idx]
 
@@ -225,8 +362,17 @@ def run_backtest(
                 planned_trades.append(t)
 
     planning_time = time.perf_counter() - t_plan0
-    logger.info("  Planning: %.2fs, %d segments → %d candidates",
-                planning_time, len(segments), len(planned_trades))
+
+    if regime_filter:
+        logger.info(
+            "  Planning: %.2fs, %d segments (%d choppy skipped, %d processed) → %d candidates",
+            planning_time, len(segments), skipped_choppy, processed_segments, len(planned_trades)
+        )
+    else:
+        logger.info(
+            "  Planning: %.2fs, %d segments → %d candidates",
+            planning_time, len(segments), len(planned_trades)
+        )
 
     # Guardrails (silent mode)
     logger.info("→ Applying guardrails (session + daily limit)...")
@@ -254,8 +400,10 @@ def run_backtest(
     )
     final_trades, rejected2 = apply_guardrails(selected, g_all)
 
-    print(f"🔍 TRADE PIPELINE:")
+    print(f"📝 TRADE PIPELINE:")
     print(f"  Candidates    : {len(planned_trades):4d}")
+    if regime_filter:
+        print(f"  Choppy skipped: {skipped_choppy:4d} segments")
     print(f"  In session    : {len(in_session):4d} (rejected: {len(rejected1)})")
     print(f"  After select  : {len(selected):4d} (days: {len(sel_stats)})")
     print(f"  Final         : {len(final_trades):4d}")
@@ -295,6 +443,14 @@ def run_backtest(
     std_r = float(res.std(ddof=1)) if len(res) > 1 else 0.0
     sharpe = float(mean_r / std_r) if std_r > 0 else 0.0
 
+    # NEW: Recovery Factor & MAR Ratio
+    recovery_factor = float(equity_curve.iloc[-1] / abs(max_dd)) if max_dd < 0 else float("inf")
+
+    # Annualized return (assuming 252 trading days/year)
+    trading_days_in_sample = days
+    annual_r = float(equity_curve.iloc[-1]) * (252.0 / trading_days_in_sample)
+    mar_ratio = annual_r / abs(max_dd) if max_dd < 0 else float("inf")
+
     winrate = float((res > 0).sum() / len(res)) if len(res) else 0.0
 
     # Side breakdown
@@ -317,6 +473,13 @@ def run_backtest(
     print(f"  Avg R/trade   : {mean_r:+7.4f}R")
     print(f"  Sharpe Ratio  : {sharpe:7.3f}")
     print(f"  Profit Factor : {profit_factor:7.2f}")
+
+    # NEW: Brooks-style metrics
+    print(f"\n🎯 BROOKS METRICS:")
+    print(f"  Expectancy    : {mean_r:+7.4f}R per trade")
+    print(f"  Recovery Factor: {recovery_factor:7.2f} (Net/MaxDD)")
+    print(f"  MAR Ratio     : {mar_ratio:7.2f} (Annual/MaxDD)")
+    print(f"  Annual R est. : {annual_r:+7.2f}R ({days} days → 252 days)")
 
     print(f"\n📈 WIN/LOSS:")
     print(f"  Winrate       : {winrate * 100:6.2f}%")
@@ -353,6 +516,13 @@ def run_backtest(
         "avg_r": mean_r,
         "long_wr": long_wr,
         "short_wr": short_wr,
+        # NEW
+        "expectancy": mean_r,
+        "recovery_factor": recovery_factor,
+        "mar_ratio": mar_ratio,
+        "annual_r": annual_r,
+        "regime_filter": regime_filter,
+        "choppy_segments_skipped": skipped_choppy if regime_filter else 0,
     }
 
 
@@ -362,7 +532,7 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--max-trades-day", type=int, default=2)
 
-    # Strategy params (for grid search)
+    # Strategy params
     parser.add_argument("--min-slope", type=float, default=0.15)
     parser.add_argument("--ema-period", type=int, default=20)
     parser.add_argument("--pullback-bars", type=int, default=3)
@@ -370,6 +540,12 @@ if __name__ == "__main__":
     parser.add_argument("--stop-buffer", type=float, default=2.0)
     parser.add_argument("--min-risk", type=float, default=2.0)
     parser.add_argument("--cooldown", type=int, default=10)
+
+    # NEW: Regime filter
+    parser.add_argument("--regime-filter", action="store_true",
+                        help="Enable regime filter (skip choppy markets)")
+    parser.add_argument("--chop-threshold", type=float, default=2.5,
+                        help="Chop threshold (higher = stricter)")
 
     args = parser.parse_args()
 
@@ -384,4 +560,6 @@ if __name__ == "__main__":
         stop_buffer=args.stop_buffer,
         min_risk_price_units=args.min_risk,
         cooldown_bars=args.cooldown,
+        regime_filter=args.regime_filter,
+        chop_threshold=args.chop_threshold,
     )

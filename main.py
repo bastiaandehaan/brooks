@@ -1,7 +1,7 @@
 # main.py
 """
-Brooks MVP - FIXED versie
-Simpele parameters, geen over-engineering
+Brooks MVP - WITH REGIME FILTER
+Only trade when market is TRENDING, skip CHOPPY days
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import MetaTrader5 as mt5
 from execution.guardrails import Guardrails, apply_guardrails
 from strategies.context import Trend, TrendParams, infer_trend_m15
 from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
+from strategies.regime import MarketRegime, RegimeParams, should_trade_today
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
 from execution.risk_manager import RiskManager
@@ -55,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session-end", default="15:00")
     p.add_argument("--max-trades-day", type=int, default=2)
 
+    # NEW: Regime Filter
+    p.add_argument("--regime-filter", action="store_true",
+                   help="Enable regime filter (skip choppy markets)")
+    p.add_argument("--chop-threshold", type=float, default=2.5,
+                   help="Range must be > (threshold × ATR) to trade")
+
     return p
 
 
@@ -63,7 +70,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    logger.info("Starting Brooks MVP (FIXED) for %s...", args.symbol)
+    logger.info("Starting Brooks MVP (WITH REGIME FILTER) for %s...", args.symbol)
 
     # 1. Connect to MT5
     client = Mt5Client(mt5_module=mt5)
@@ -95,6 +102,22 @@ def main() -> int:
         logger.error("Fetched empty dataframes.")
         client.shutdown()
         return 1
+
+    # 3b. NEW: Check Market Regime (BEFORE trend analysis!)
+    if args.regime_filter:
+        regime_params = RegimeParams(chop_threshold=args.chop_threshold)
+        should_trade, regime_reason = should_trade_today(m15, regime_params)
+
+        if not should_trade:
+            logger.info("⛔ REGIME FILTER: %s", regime_reason)
+            print("\n" + "⛔" * 30)
+            print(" MARKET REGIME: CHOPPY - NO TRADE TODAY")
+            print(f" Reason: {regime_reason}")
+            print("⛔" * 30 + "\n")
+            client.shutdown()
+            return 0
+
+        logger.info("✅ REGIME FILTER: %s", regime_reason)
 
     # 4. Infer Trend (M15) - SIMPEL
     t_params = TrendParams(ema_period=args.ema)
@@ -173,15 +196,18 @@ def main() -> int:
     pick = accepted[0]
 
     # TRADE OUTPUT
+    regime_status = "✅ TRENDING" if args.regime_filter else "⚠️ NOT FILTERED"
+
     print("\n" + "!" * 60)
-    print(f" BROOKS TRADE SIGNAL (FIXED): {args.symbol}")
-    print(f" RICHTING    : {pick.side}")
-    print(f" ENTRY (OPEN): {pick.entry:.2f}")
-    print(f" STOP LOSS   : {pick.stop:.2f}")
-    print(f" TAKE PROFIT : {pick.tp:.2f}")
-    print(f" VOLUME      : {lots} LOTS")
-    print(f" RISICO      : {args.risk_pct}% (${acc_info.balance * args.risk_pct / 100:.2f})")
-    print(f" REDEN       : {pick.reason}")
+    print(f" BROOKS TRADE SIGNAL: {args.symbol}")
+    print(f" MARKET REGIME : {regime_status}")
+    print(f" RICHTING      : {pick.side}")
+    print(f" ENTRY (OPEN)  : {pick.entry:.2f}")
+    print(f" STOP LOSS     : {pick.stop:.2f}")
+    print(f" TAKE PROFIT   : {pick.tp:.2f}")
+    print(f" VOLUME        : {lots} LOTS")
+    print(f" RISICO        : {args.risk_pct}% (${acc_info.balance * args.risk_pct / 100:.2f})")
+    print(f" REDEN         : {pick.reason}")
     print("!" * 60 + "\n")
 
     logger.info("LIVE MODE: Order-executie is handmatig. Kopieer bovenstaande data.")
