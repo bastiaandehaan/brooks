@@ -1,71 +1,58 @@
+# execution/risk_manager.py
+from __future__ import annotations
+
+from dataclasses import dataclass
 import logging
 
-from utils.symbol_spec import SymbolSpec
+log = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
+@dataclass(frozen=True)
+class RiskParams:
+    min_risk_pts: float = 1.0   # example; keep your existing defaults
+    fees_usd: float = 0.0
 
 class RiskManager:
-    def __init__(self, risk_per_trade_pct: float = 1.0):
-        self.risk_per_trade_pct = risk_per_trade_pct
+    def __init__(self, params: RiskParams):
+        self.params = params
 
-    def calculate_lot_size(
+    def size_position(
         self,
+        *,
         balance: float,
-        spec: SymbolSpec,
         entry: float,
         stop: float,
-    ) -> float:
+        tick_size: float,
+        contract_size: float,
+        risk_pct: float | None = None,
+        fees_usd: float | None = None,
+        **_ignored: object,   # keeps older callers from breaking if they pass extra
+    ) -> tuple[float, float]:
         """
-        Risk-based position sizing.
-        Alle inputs worden gelogd zodat 'small risk' issues zichtbaar zijn.
+        Returns (lots, risk_usd).
+        risk_pct is percent of balance (e.g. 0.5 means 0.5%).
         """
 
-        if balance <= 0:
-            logger.info("RISK: balance<=0 → no sizing")
-            return 0.0
+        if risk_pct is None:
+            raise TypeError("risk_pct is required for sizing (percent, e.g. 0.5)")
 
-        # 1. USD risico
-        risk_usd = balance * (self.risk_per_trade_pct / 100.0)
+        fees = self.params.fees_usd if fees_usd is None else float(fees_usd)
 
-        # 2. Prijsafstand
-        price_risk = abs(entry - stop)
-        if price_risk <= 0:
-            logger.info(
-                "RISK: invalid price_risk entry=%.5f stop=%.5f → skip",
-                entry,
-                stop,
-            )
-            return 0.0
+        risk_pts = abs(float(entry) - float(stop))
+        if risk_pts <= 0:
+            raise ValueError("Invalid stop: risk_pts must be > 0")
 
-        # 3. Waarde per punt per lot
-        value_per_lot_step = spec.usd_per_price_unit_per_lot
-        if value_per_lot_step <= 0:
-            logger.error(
-                "RISK: invalid symbol spec usd_per_price_unit_per_lot=%s",
-                value_per_lot_step,
-            )
-            return 0.0
+        if risk_pts < float(self.params.min_risk_pts):
+            raise ValueError(f"Risk too small: {risk_pts:.4f} < min_risk_pts={self.params.min_risk_pts:.4f}")
 
-        # 4. Ruwe lot size
-        raw_lots = risk_usd / (price_risk * value_per_lot_step)
+        risk_usd_target = float(balance) * (float(risk_pct) / 100.0)
+        # USD per 1.0 price point for 1 lot:
+        usd_per_point_per_lot = float(contract_size)
 
-        # 5. Afronden naar broker constraints
-        final_lots = spec.round_volume_down(raw_lots)
+        lots = (risk_usd_target - fees) / (risk_pts * usd_per_point_per_lot)
+        lots = max(0.0, lots)
 
-        logger.info(
-            "RISK: balance=%.2f risk_pct=%.2f risk_usd=%.2f "
-            "entry=%.5f stop=%.5f price_risk=%.5f "
-            "usd_per_point=%.5f raw_lots=%.4f final_lots=%.4f",
-            balance,
-            self.risk_per_trade_pct,
-            risk_usd,
-            entry,
-            stop,
-            price_risk,
-            value_per_lot_step,
-            raw_lots,
-            final_lots,
+        log.info(
+            "SIZING: balance=%.2f risk_pct=%.4f risk_usd_target=%.2f risk_pts=%.4f contract=%.4f -> lots=%.4f",
+            balance, risk_pct, risk_usd_target, risk_pts, contract_size, lots
         )
-
-        return final_lots
+        return lots, max(0.0, risk_usd_target - fees)
