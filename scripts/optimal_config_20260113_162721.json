@@ -1,0 +1,41 @@
+{
+  "regime": {
+    "regime_filter": true,
+    "chop_threshold": 3.0
+  },
+  "context": {
+    "min_slope": 0.1,
+    "ema_period": 15
+  },
+  "h2l2": {
+    "pullback_bars": 3,
+    "signal_close_frac": 0.35
+  },
+  "risk": {
+    "stop_buffer": 1.0,
+    "min_risk_price_units": 2.5
+  },
+  "execution": {
+    "cooldown_bars": 20,
+    "max_trades_day": 1
+  },
+  "costs": {
+    "costs_per_trade_r": 0.04
+  },
+  "performance_180d": {
+    "daily_sharpe": 3.038,
+    "net_r": 60.68000000000011,
+    "winrate": 0.47468354430379744,
+    "trades": 158,
+    "max_dd": -5.319999999999993
+  },
+  "performance_340d": {
+    "daily_sharpe": 1.725,
+    "net_r": 69.56000000000004,
+    "winrate": 0.4212218649517685,
+    "trades": 311,
+    "max_dd": -17.039999999999985,
+    "recovery_factor": 4.082159624413152,
+    "mar_ratio": 3.0256006628003362
+  }
+}

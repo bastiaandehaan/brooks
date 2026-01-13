@@ -1,0 +1,15 @@
+{"timestamp": "2026-01-13T14:58:27.219409", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T14:58:27.219415", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-13T14:58:27.219417", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T16:34:27.540055", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T16:34:27.540064", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-13T16:34:27.540067", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T17:36:46.152671", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T17:36:46.152679", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-13T17:36:46.152681", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T19:48:04.647869", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T19:48:04.647879", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-13T19:48:04.647881", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T19:48:35.805331", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-13T19:48:35.805340", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-13T19:48:35.805342", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
