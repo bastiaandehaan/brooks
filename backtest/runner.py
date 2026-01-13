@@ -1,7 +1,7 @@
 # backtest/runner.py
 """
-Brooks Backtest Runner - WITH REGIME FILTER
-Skip choppy days, only trade trending markets
+Brooks Backtest Runner - WITH REGIME FILTER & COSTS
+Skip choppy days, apply realistic trading costs
 """
 import sys
 import os
@@ -21,7 +21,7 @@ from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
 from strategies.context import TrendParams, Trend, infer_trend_m15_series
 from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side, PlannedTrade
-from strategies.regime import RegimeParams, detect_regime_series, MarketRegime  # NEW!
+from strategies.regime import RegimeParams, detect_regime_series, MarketRegime
 from execution.guardrails import Guardrails, apply_guardrails
 
 # Suppress guardrail spam logging
@@ -60,51 +60,6 @@ def precalculate_trends(m15_df: pd.DataFrame, params: TrendParams) -> pd.DataFra
     return out
 
 
-def precalculate_regime(
-        m15_df: pd.DataFrame,
-        params: RegimeParams
-) -> pd.DataFrame:
-    """
-    Calculate regime for each M15 bar (rolling window)
-
-    Returns DataFrame with columns:
-    - regime: TRENDING/CHOPPY/UNKNOWN
-    - chop_ratio: float
-    """
-    logger.info("→ Calculating market regime (rolling)...")
-    t0 = time.perf_counter()
-
-    regimes = []
-    chop_ratios = []
-
-    # Need enough bars for ATR + range calculation
-    min_required = params.atr_period + params.range_period  # 14 + 20 = 34 bars minimum
-
-    for i in range(len(m15_df)):
-        # Use expanding window (from start to current bar)
-        # This gives regime context based on ALL history up to this point
-        if i < min_required:
-            regimes.append(MarketRegime.UNKNOWN)
-            chop_ratios.append(0.0)
-        else:
-            # Take last N bars (enough for calculation)
-            # Use 100 bars lookback for stable regime detection
-            lookback = min(100, i + 1)
-            window = m15_df.iloc[i - lookback + 1:i + 1]
-
-            regime, metrics = detect_regime(window, params)
-            regimes.append(regime)
-            chop_ratios.append(metrics.chop_ratio)
-
-    out = pd.DataFrame({
-        "regime": regimes,
-        "chop_ratio": chop_ratios
-    }, index=m15_df.index)
-
-    logger.info("  Regime calc: %.2fs", time.perf_counter() - t0)
-    return out
-
-
 def _trend_to_side(trend: Trend) -> Side | None:
     if trend == Trend.BULL:
         return Side.LONG
@@ -114,6 +69,10 @@ def _trend_to_side(trend: Trend) -> Side | None:
 
 
 def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> float:
+    """
+    Simulate trade outcome with worst-case both-hit policy.
+    Returns R-value BEFORE costs (costs applied later).
+    """
     future = m5_data.loc[t.execute_ts:]
     for _, bar in future.iterrows():
         high = float(bar["high"])
@@ -140,6 +99,25 @@ def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> float:
     return 0.0
 
 
+def _apply_costs(result_r: float, costs_r: float) -> float:
+    """
+    Apply trading costs to a trade result.
+
+    Costs are deducted from BOTH wins and losses:
+    - Winner: +2R → +2R - costs
+    - Loser: -1R → -1R - costs (makes it worse!)
+    - Breakeven: 0R → -costs (turns into loss!)
+
+    Args:
+        result_r: Raw trade result in R
+        costs_r: Cost per trade in R (e.g., 0.04R)
+
+    Returns:
+        Net result after costs
+    """
+    return result_r - costs_r
+
+
 def run_backtest(
         symbol: str,
         days: int,
@@ -152,12 +130,14 @@ def run_backtest(
         stop_buffer: float = 2.0,
         min_risk_price_units: float = 2.0,
         cooldown_bars: int = 10,
-        # NEW: REGIME FILTER
+        # REGIME FILTER
         regime_filter: bool = False,
         chop_threshold: float = 2.5,
+        # NEW: COSTS
+        costs_per_trade_r: float = 0.0,
 ) -> Dict[str, Any]:
     """
-    Backtest with optional regime filter
+    Backtest with optional regime filter and trading costs
     """
     client = Mt5Client(mt5_module=mt5)
     if not client.initialize():
@@ -174,6 +154,8 @@ def run_backtest(
         print(f"  🔍 REGIME FILTER: ENABLED (chop_threshold={chop_threshold})")
     else:
         print(f"  ⚠️  REGIME FILTER: DISABLED")
+    if costs_per_trade_r > 0:
+        print(f"  💸 COSTS: {costs_per_trade_r:.4f}R per trade")
     print("=" * 80)
     print(f"\n📊 STRATEGY PARAMETERS:")
     print(f"  Context    : min_slope={min_slope:.2f}, ema_period={ema_period}")
@@ -199,7 +181,7 @@ def run_backtest(
 
     logger.info("  M15: %d bars, M5: %d bars", len(m15_data), len(m5_data))
 
-    # NEW: Calculate Regime (if enabled) - VECTORIZED!
+    # Calculate Regime (if enabled)
     regime_data = None
     if regime_filter:
         logger.info("→ Calculating market regime (vectorized)...")
@@ -208,7 +190,7 @@ def run_backtest(
         regime_params = RegimeParams(chop_threshold=chop_threshold)
         regime_series = detect_regime_series(m15_data, regime_params)
 
-        # Calculate chop_ratio for stats (optional)
+        # Calculate chop_ratio for stats
         high = m15_data["high"].astype(float)
         low = m15_data["low"].astype(float)
         close = m15_data["close"].astype(float)
@@ -223,7 +205,7 @@ def run_backtest(
 
         threshold_range = regime_params.chop_threshold * avg_atr
         chop_ratio = price_range / threshold_range
-        chop_ratio = chop_ratio.fillna(0.0)  # Fill NaN with 0
+        chop_ratio = chop_ratio.fillna(0.0)
 
         regime_data = pd.DataFrame({
             "regime": regime_series,
@@ -251,7 +233,7 @@ def run_backtest(
     m5_data = m5_data.copy()
     m5_data["trend"] = merged["trend"].values
 
-    # NEW: Merge regime to M5 (if enabled)
+    # Merge regime to M5 (if enabled)
     if regime_filter and regime_data is not None:
         regime_series = regime_data.reset_index().rename(columns={"index": "ts"})
         merged_regime = pd.merge_asof(
@@ -274,7 +256,7 @@ def run_backtest(
     print(f"  Bear  : {bear_bars:5d} bars ({bear_bars / len(m5_data) * 100:5.1f}%)")
     print(f"  Range : {none_bars:5d} bars ({none_bars / len(m5_data) * 100:5.1f}%)")
 
-    # NEW: Regime distribution (if enabled)
+    # Regime distribution (if enabled)
     if regime_filter:
         regime_counts = m5_data["regime"].value_counts()
         trending_bars = regime_counts.get(MarketRegime.TRENDING, 0)
@@ -314,14 +296,12 @@ def run_backtest(
         trend_val = m5_data.iloc[i]["trend"]
         side = _trend_to_side(trend_val) if not pd.isna(trend_val) else None
 
-        # NEW: Check regime
+        # Check regime
         regime_val = None
         if regime_filter:
             regime_val = m5_data.iloc[i].get("regime", MarketRegime.UNKNOWN)
 
-        # Segment breaks on:
-        # 1. Trend change
-        # 2. Regime change (if filter enabled)
+        # Segment breaks on trend or regime change
         should_break = (side != current_trend)
         if regime_filter:
             should_break = should_break or (regime_val != current_regime)
@@ -336,12 +316,12 @@ def run_backtest(
     if current_trend is not None and segment_start < total_bars:
         segments.append((segment_start, total_bars, current_trend, current_regime))
 
-    # NEW: Track skipped segments
+    # Track skipped segments
     skipped_choppy = 0
     processed_segments = 0
 
     for seg_idx, (start_idx, end_idx, trend_side, regime_val) in enumerate(segments):
-        # NEW: Skip if regime is CHOPPY
+        # Skip if regime is CHOPPY
         if regime_filter and regime_val == MarketRegime.CHOPPY:
             skipped_choppy += 1
             continue
@@ -409,10 +389,12 @@ def run_backtest(
     print(f"  Final         : {len(final_trades):4d}")
     print()
 
-    # Simulate
+    # Simulate with costs
     results_r: list[float] = []
     for t in final_trades:
-        results_r.append(_simulate_trade_outcome(m5_data, t))
+        raw_result = _simulate_trade_outcome(m5_data, t)
+        net_result = _apply_costs(raw_result, costs_per_trade_r)
+        results_r.append(net_result)
 
     if not results_r:
         logger.info("⚠️  No trades executed.")
@@ -443,10 +425,9 @@ def run_backtest(
     std_r = float(res.std(ddof=1)) if len(res) > 1 else 0.0
     sharpe = float(mean_r / std_r) if std_r > 0 else 0.0
 
-    # NEW: Recovery Factor & MAR Ratio
+    # Brooks metrics
     recovery_factor = float(equity_curve.iloc[-1] / abs(max_dd)) if max_dd < 0 else float("inf")
 
-    # Annualized return (assuming 252 trading days/year)
     trading_days_in_sample = days
     annual_r = float(equity_curve.iloc[-1]) * (252.0 / trading_days_in_sample)
     mar_ratio = annual_r / abs(max_dd) if max_dd < 0 else float("inf")
@@ -467,6 +448,18 @@ def run_backtest(
     print("=" * 80)
     print("  📊 RESULTS")
     print("=" * 80)
+
+    # Show costs impact if applied
+    if costs_per_trade_r > 0:
+        total_cost = costs_per_trade_r * len(res)
+        gross_profit = float(equity_curve.iloc[-1]) + total_cost
+        print(f"\n💸 COSTS IMPACT:")
+        print(f"  Cost per trade : {costs_per_trade_r:.4f}R")
+        print(f"  Total cost     : {total_cost:.2f}R over {len(res)} trades")
+        print(f"  Gross profit   : {gross_profit:+.2f}R (before costs)")
+        print(f"  Net profit     : {float(equity_curve.iloc[-1]):+.2f}R (after costs)")
+        print(f"  Impact         : {-total_cost:.2f}R ({-total_cost / gross_profit * 100:.1f}% reduction)")
+
     print(f"\n💰 PERFORMANCE:")
     print(f"  Trades        : {len(res):4d}")
     print(f"  Net R         : {float(equity_curve.iloc[-1]):+7.2f}R")
@@ -474,7 +467,6 @@ def run_backtest(
     print(f"  Sharpe Ratio  : {sharpe:7.3f}")
     print(f"  Profit Factor : {profit_factor:7.2f}")
 
-    # NEW: Brooks-style metrics
     print(f"\n🎯 BROOKS METRICS:")
     print(f"  Expectancy    : {mean_r:+7.4f}R per trade")
     print(f"  Recovery Factor: {recovery_factor:7.2f} (Net/MaxDD)")
@@ -516,13 +508,13 @@ def run_backtest(
         "avg_r": mean_r,
         "long_wr": long_wr,
         "short_wr": short_wr,
-        # NEW
         "expectancy": mean_r,
         "recovery_factor": recovery_factor,
         "mar_ratio": mar_ratio,
         "annual_r": annual_r,
         "regime_filter": regime_filter,
         "choppy_segments_skipped": skipped_choppy if regime_filter else 0,
+        "costs_per_trade_r": costs_per_trade_r,
     }
 
 
@@ -541,11 +533,15 @@ if __name__ == "__main__":
     parser.add_argument("--min-risk", type=float, default=2.0)
     parser.add_argument("--cooldown", type=int, default=10)
 
-    # NEW: Regime filter
+    # Regime filter
     parser.add_argument("--regime-filter", action="store_true",
                         help="Enable regime filter (skip choppy markets)")
     parser.add_argument("--chop-threshold", type=float, default=2.5,
                         help="Chop threshold (higher = stricter)")
+
+    # NEW: Costs
+    parser.add_argument("--costs", type=float, default=0.0,
+                        help="Trading costs per trade in R (e.g., 0.04 for spread+slippage)")
 
     args = parser.parse_args()
 
@@ -562,4 +558,5 @@ if __name__ == "__main__":
         cooldown_bars=args.cooldown,
         regime_filter=args.regime_filter,
         chop_threshold=args.chop_threshold,
+        costs_per_trade_r=args.costs,
     )
