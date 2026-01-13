@@ -7,6 +7,7 @@ import os
 import requests
 from datetime import datetime
 from typing import Optional, Dict, Any
+from dataclasses import dataclass
 
 # Try to load .env
 try:
@@ -15,6 +16,21 @@ try:
     load_dotenv()
 except ImportError:
     print("⚠️  python-dotenv not installed. Install with: pip install python-dotenv")
+
+
+@dataclass
+class TradingSignal:
+    """Structured trading signal data for Telegram notifications"""
+    symbol: str
+    side: str  # "LONG" or "SHORT"
+    entry: float
+    stop: float
+    target: float
+    lots: float
+    risk_usd: float
+    risk_pct: float
+    reason: str
+    regime: Optional[str] = None
 
 
 class TelegramBot:

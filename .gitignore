@@ -84,4 +84,6 @@ all_code_dump.txt
 
 
 *.prof
+# Should contain
+.env
 

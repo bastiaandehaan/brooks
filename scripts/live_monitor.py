@@ -24,6 +24,7 @@ from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from strategies.regime import RegimeParams, should_trade_today
 from execution.guardrails import Guardrails, apply_guardrails
 from execution.risk_manager import RiskManager
+from execution.ftmo_guardian import FTMOGuardian, FTMORules, FTMOAccountType
 from utils.telegram_bot import TelegramBot, TradingSignal
 
 logging.basicConfig(
@@ -54,7 +55,9 @@ def check_for_signals(
         regime_filter: bool,
         chop_threshold: float,
         stop_buffer: float,
-        telegram_bot: TelegramBot
+        telegram_bot: TelegramBot,
+        ftmo_guardian: Optional[FTMOGuardian] = None,
+        daily_pnl: float = 0.0
 ) -> bool:
     """
     Check for trading signals and send Telegram notification if found
@@ -176,6 +179,22 @@ def check_for_signals(
 
         risk_usd = acc_info.balance * risk_pct / 100
 
+        # FTMO Guardian Check (if enabled)
+        if ftmo_guardian:
+            can_trade, ftmo_reason = ftmo_guardian.can_trade(
+                current_balance=acc_info.balance,
+                daily_pnl=daily_pnl,
+                open_risk=risk_usd
+            )
+
+            if not can_trade:
+                logger.error(f"🛡️ FTMO GUARDIAN BLOCKED TRADE: {ftmo_reason}")
+                telegram_bot.send_error(f"TRADE BLOCKED BY FTMO RULES:\n{ftmo_reason}")
+                client.shutdown()
+                return False
+
+            logger.info(f"✅ FTMO Guardian: {ftmo_reason}")
+
         # Build signal
         signal = TradingSignal(
             symbol=symbol,
@@ -231,6 +250,8 @@ def run_monitor(
         chop_threshold: float,
         stop_buffer: float,
         check_interval: int = 300,  # 5 minutes
+        enable_ftmo_protection: bool = True,
+        ftmo_account_size: float = 10000.0
 ):
     """
     Main monitoring loop
@@ -254,6 +275,7 @@ def run_monitor(
     logger.info(f"Stop buffer      : {stop_buffer}")
     logger.info(f"Check interval   : {check_interval}s ({check_interval / 60:.1f} min)")
     logger.info(f"NY Session hours : 09:30-15:00 EST")
+    logger.info(f"FTMO Protection  : {'ENABLED' if enable_ftmo_protection else 'DISABLED'}")
     logger.info("=" * 60 + "\n")
 
     # Initialize Telegram bot
@@ -265,17 +287,32 @@ def run_monitor(
         logger.error("Check your .env file has TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
         return
 
+    # Initialize FTMO Guardian (if enabled)
+    ftmo_guardian = None
+    if enable_ftmo_protection:
+        rules = FTMORules.for_10k_challenge() if ftmo_account_size == 10000 else FTMORules(
+            account_type=FTMOAccountType.CHALLENGE_10K,
+            initial_balance=ftmo_account_size
+        )
+        ftmo_guardian = FTMOGuardian(rules)
+        logger.info("✅ FTMO Guardian enabled")
+
     # Send startup notification
-    telegram_bot._send_message(
+    startup_msg = (
         "🤖 <b>Brooks Live Monitor Started</b>\n\n"
         f"Symbol: {symbol}\n"
         f"Risk: {risk_pct}%\n"
         f"Regime Filter: {'ON' if regime_filter else 'OFF'}\n"
-        f"Monitoring NY session (09:30-15:00 EST)"
     )
+    if ftmo_guardian:
+        startup_msg += f"🛡️ FTMO Protection: ENABLED\n"
+    startup_msg += "Monitoring NY session (09:30-15:00 EST)"
+
+    telegram_bot._send_message(startup_msg)
 
     iteration = 0
     last_signal_time = None
+    daily_pnl = 0.0  # Track daily P&L (reset at midnight)
 
     try:
         while True:
@@ -299,7 +336,9 @@ def run_monitor(
                 regime_filter=regime_filter,
                 chop_threshold=chop_threshold,
                 stop_buffer=stop_buffer,
-                telegram_bot=telegram_bot
+                telegram_bot=telegram_bot,
+                ftmo_guardian=ftmo_guardian,
+                daily_pnl=daily_pnl
             )
 
             if found:
@@ -330,6 +369,10 @@ if __name__ == "__main__":
                         help="Stop buffer")
     parser.add_argument("--interval", type=int, default=300,
                         help="Check interval in seconds (default: 300 = 5min)")
+    parser.add_argument("--ftmo-protection", action="store_true", default=True,
+                        help="Enable FTMO rule protection (default: enabled)")
+    parser.add_argument("--ftmo-account-size", type=float, default=10000.0,
+                        help="FTMO account size for risk limits")
 
     args = parser.parse_args()
 
@@ -339,5 +382,7 @@ if __name__ == "__main__":
         regime_filter=args.regime_filter,
         chop_threshold=args.chop_threshold,
         stop_buffer=args.stop_buffer,
-        check_interval=args.interval
+        check_interval=args.interval,
+        enable_ftmo_protection=args.ftmo_protection,
+        ftmo_account_size=args.ftmo_account_size
     )
