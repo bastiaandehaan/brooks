@@ -1,7 +1,7 @@
 # backtest/runner.py
 """
-Brooks Backtest Runner - WITH REGIME FILTER & COSTS
-Skip choppy days, apply realistic trading costs
+Brooks Backtest Runner - WITH REGIME FILTER & COSTS & DAILY SHARPE
+Skip choppy days, apply realistic trading costs, calculate proper Sharpe ratio
 """
 import sys
 import os
@@ -11,7 +11,7 @@ import argparse
 import logging
 import pandas as pd
 import MetaTrader5 as mt5
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
@@ -23,6 +23,7 @@ from strategies.context import TrendParams, Trend, infer_trend_m15_series
 from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side, PlannedTrade
 from strategies.regime import RegimeParams, detect_regime_series, MarketRegime
 from execution.guardrails import Guardrails, apply_guardrails
+from utils.daily_sharpe_calculator import calculate_daily_sharpe
 
 # Suppress guardrail spam logging
 import logging as _log
@@ -118,6 +119,23 @@ def _apply_costs(result_r: float, costs_r: float) -> float:
     return result_r - costs_r
 
 
+def _build_trades_dataframe(final_trades: List[PlannedTrade], results_r: List[float]) -> pd.DataFrame:
+    """Build DataFrame of trade history for analysis."""
+    trades_data = []
+    for trade, result in zip(final_trades, results_r):
+        trades_data.append({
+            'entry_time': trade.execute_ts,
+            'exit_time': trade.execute_ts + pd.Timedelta(hours=2),  # Estimate exit time
+            'side': trade.side.value,
+            'entry': trade.entry,
+            'stop': trade.stop,
+            'tp': trade.tp,
+            'net_r': result,
+            'reason': trade.reason
+        })
+    return pd.DataFrame(trades_data)
+
+
 def run_backtest(
         symbol: str,
         days: int,
@@ -133,7 +151,7 @@ def run_backtest(
         # REGIME FILTER
         regime_filter: bool = False,
         chop_threshold: float = 2.5,
-        # NEW: COSTS
+        # COSTS
         costs_per_trade_r: float = 0.0,
 ) -> Dict[str, Any]:
     """
@@ -151,7 +169,7 @@ def run_backtest(
     print("\n" + "=" * 80)
     print(f"  BROOKS BACKTEST: {symbol} ({days} days)")
     if regime_filter:
-        print(f"  🔍 REGIME FILTER: ENABLED (chop_threshold={chop_threshold})")
+        print(f"  🔎 REGIME FILTER: ENABLED (chop_threshold={chop_threshold})")
     else:
         print(f"  ⚠️  REGIME FILTER: DISABLED")
     if costs_per_trade_r > 0:
@@ -263,7 +281,7 @@ def run_backtest(
         choppy_bars = regime_counts.get(MarketRegime.CHOPPY, 0)
         unknown_bars = regime_counts.get(MarketRegime.UNKNOWN, 0)
 
-        print(f"\n🔍 REGIME DISTRIBUTION:")
+        print(f"\n🔎 REGIME DISTRIBUTION:")
         print(f"  Trending : {trending_bars:5d} bars ({trending_bars / len(m5_data) * 100:5.1f}%)")
         print(f"  Choppy   : {choppy_bars:5d} bars ({choppy_bars / len(m5_data) * 100:5.1f}%)")
         print(f"  Unknown  : {unknown_bars:5d} bars ({unknown_bars / len(m5_data) * 100:5.1f}%)")
@@ -380,7 +398,7 @@ def run_backtest(
     )
     final_trades, rejected2 = apply_guardrails(selected, g_all)
 
-    print(f"📝 TRADE PIPELINE:")
+    print(f"🔎 TRADE PIPELINE:")
     print(f"  Candidates    : {len(planned_trades):4d}")
     if regime_filter:
         print(f"  Choppy skipped: {skipped_choppy:4d} segments")
@@ -444,6 +462,16 @@ def run_backtest(
     long_wr = sum(1 for r in long_results if r > 0) / len(long_results) if long_results else 0
     short_wr = sum(1 for r in short_results if r > 0) / len(short_results) if short_results else 0
 
+    # Build trades DataFrame for Daily Sharpe calculation
+    trades_df = _build_trades_dataframe(final_trades, results_r)
+
+    # Calculate Daily Sharpe
+    daily_sharpe_metrics = calculate_daily_sharpe(
+        trades_df[['exit_time', 'net_r']],
+        initial_capital=10000.0,
+        trading_days_per_year=252
+    )
+
     # Output
     print("=" * 80)
     print("  📊 RESULTS")
@@ -464,7 +492,8 @@ def run_backtest(
     print(f"  Trades        : {len(res):4d}")
     print(f"  Net R         : {float(equity_curve.iloc[-1]):+7.2f}R")
     print(f"  Avg R/trade   : {mean_r:+7.4f}R")
-    print(f"  Sharpe Ratio  : {sharpe:7.3f}")
+    print(f"  Trade Sharpe  : {sharpe:7.3f}  (legacy, use Daily Sharpe)")
+    print(f"  Daily Sharpe  : {daily_sharpe_metrics['daily_sharpe']:7.3f}  ⭐ (correct metric)")
     print(f"  Profit Factor : {profit_factor:7.2f}")
 
     print(f"\n🎯 BROOKS METRICS:")
@@ -472,6 +501,13 @@ def run_backtest(
     print(f"  Recovery Factor: {recovery_factor:7.2f} (Net/MaxDD)")
     print(f"  MAR Ratio     : {mar_ratio:7.2f} (Annual/MaxDD)")
     print(f"  Annual R est. : {annual_r:+7.2f}R ({days} days → 252 days)")
+
+    print(f"\n📉 DAILY RETURNS ANALYSIS:")
+    print(f"  Daily Sharpe     : {daily_sharpe_metrics['daily_sharpe']:7.3f}")
+    print(f"  Annualized Return: {daily_sharpe_metrics['annualized_return']:7.2f}%")
+    print(f"  Annualized Vol   : {daily_sharpe_metrics['annualized_vol']:7.2f}%")
+    print(f"  Trading Days     : {daily_sharpe_metrics['total_trading_days']:4d} calendar days")
+    print(f"  Days w/ Trades   : {daily_sharpe_metrics['days_with_trades']:4d} active days")
 
     print(f"\n📈 WIN/LOSS:")
     print(f"  Winrate       : {winrate * 100:6.2f}%")
@@ -484,17 +520,39 @@ def run_backtest(
     print(f"  Max DD bars   : {max_dd_bars:4d} trades")
     print(f"  DD % of equity: {abs(max_dd) / float(equity_curve.iloc[-1]) * 100:6.2f}%")
 
-    print(f"\n⚖️  SIDE BREAKDOWN:")
+    print(f"\n⚖️ SIDE BREAKDOWN:")
     print(f"  Long trades   : {len(long_trades):4d} (WR: {long_wr * 100:5.1f}%)")
     print(f"  Short trades  : {len(short_trades):4d} (WR: {short_wr * 100:5.1f}%)")
 
-    print(f"\n⏱️  PERFORMANCE:")
+    print(f"\n⏱️ PERFORMANCE:")
     print(f"  Planning      : {planning_time:6.2f}s")
     print(f"  Bars/second   : {total_bars / planning_time:8.1f}")
 
     print("\n" + "=" * 80 + "\n")
 
-    generate_performance_report(results_r, equity_curve, drawdown, symbol=symbol, days=days)
+    # Pass config to visualiser
+    config = {
+        'regime_filter': regime_filter,
+        'chop_threshold': chop_threshold,
+        'stop_buffer': stop_buffer,
+        'cooldown_bars': cooldown_bars,
+        'costs_per_trade_r': costs_per_trade_r,
+        'daily_sharpe': daily_sharpe_metrics['daily_sharpe'],
+        'annual_return': daily_sharpe_metrics['annualized_return'],
+        'annual_vol': daily_sharpe_metrics['annualized_vol']
+    }
+
+    generate_performance_report(
+        results_r,
+        equity_curve,
+        drawdown,
+        symbol=symbol,
+        days=days,
+        m5_data=m5_data,
+        trades=final_trades,
+        config=config
+    )
+
     client.shutdown()
 
     return {
@@ -503,6 +561,7 @@ def run_backtest(
         "net_r": float(equity_curve.iloc[-1]),
         "winrate": winrate,
         "sharpe": sharpe,
+        "daily_sharpe": daily_sharpe_metrics['daily_sharpe'],
         "profit_factor": profit_factor,
         "max_dd": max_dd,
         "avg_r": mean_r,
@@ -515,6 +574,8 @@ def run_backtest(
         "regime_filter": regime_filter,
         "choppy_segments_skipped": skipped_choppy if regime_filter else 0,
         "costs_per_trade_r": costs_per_trade_r,
+        "annualized_return": daily_sharpe_metrics['annualized_return'],
+        "annualized_vol": daily_sharpe_metrics['annualized_vol'],
     }
 
 
@@ -539,7 +600,7 @@ if __name__ == "__main__":
     parser.add_argument("--chop-threshold", type=float, default=2.5,
                         help="Chop threshold (higher = stricter)")
 
-    # NEW: Costs
+    # Costs
     parser.add_argument("--costs", type=float, default=0.0,
                         help="Trading costs per trade in R (e.g., 0.04 for spread+slippage)")
 
