@@ -8,6 +8,7 @@ import os
 import time
 import logging
 import argparse
+from typing import Optional
 from datetime import datetime
 import pandas as pd
 import MetaTrader5 as mt5
@@ -308,7 +309,7 @@ def run_monitor(
         startup_msg += f"🛡️ FTMO Protection: ENABLED\n"
     startup_msg += "Monitoring NY session (09:30-15:00 EST)"
 
-    telegram_bot._send_message(startup_msg)
+    telegram_bot.send_message(startup_msg)
 
     iteration = 0
     last_signal_time = None

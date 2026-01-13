@@ -94,36 +94,33 @@ class TelegramBot:
             print(f"❌ Telegram send failed: {e}")
             return None
 
-    def send_signal(self, signal: Dict[str, Any]) -> bool:
+    def send_signal(self, signal: TradingSignal) -> bool:
         """
         Send trade signal notification
 
         Args:
-            signal: Dict with keys: trade, lots, risk_usd, balance
+            signal: TradingSignal object
 
         Returns:
             True if sent successfully
         """
-        trade = signal['trade']
-        lots = signal['lots']
-        risk_usd = signal['risk_usd']
-
         # Direction emoji
-        emoji = "🟢" if trade.side.value == "LONG" else "🔴"
+        emoji = "🟢" if signal.side == "LONG" else "🔴"
 
         msg = f"""
 {emoji} <b>BROOKS SIGNAL DETECTED</b>
 
-<b>Direction:</b> {trade.side.value}
-<b>Entry:</b> {trade.entry:.2f}
-<b>Stop Loss:</b> {trade.stop:.2f}
-<b>Take Profit:</b> {trade.tp:.2f}
+<b>Symbol:</b> {signal.symbol}
+<b>Direction:</b> {signal.side}
+<b>Entry:</b> {signal.entry:.2f}
+<b>Stop Loss:</b> {signal.stop:.2f}
+<b>Take Profit:</b> {signal.target:.2f}
 
-<b>Position Size:</b> {lots:.2f} lots
-<b>Risk:</b> ${risk_usd:.2f} ({(risk_usd / signal['balance'] * 100):.2f}%)
+<b>Position Size:</b> {signal.lots:.2f} lots
+<b>Risk:</b> ${signal.risk_usd:.2f} ({signal.risk_pct:.2f}%)
 
-<b>Setup:</b> {trade.reason}
-<b>Time:</b> {trade.signal_ts.strftime('%H:%M:%S')} UTC
+<b>Regime:</b> {signal.regime}
+<b>Setup:</b> {signal.reason}
 
 ⚠️ <i>Manually enter this trade in your platform</i>
         """.strip()

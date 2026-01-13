@@ -65,10 +65,19 @@ Desktop.ini
 *.code-workspace
 
 # ============================================================
+# Secrets (NEVER COMMIT!)
+# ============================================================
+.env
+.env.local
+.env.*.local
+
+# ============================================================
 # Project-specific generated outputs
 # ============================================================
 backtest_report_*.png
 optimal_config.json
+trade_log_*.json
+daily_stats_*.json
 
 # ============================================================
 # LLM / export helpers (avoid export-in-export recursion!)
@@ -81,9 +90,3 @@ pyfiles.txt
 all_code_dump.txt
 
 *.prof
-
-
-*.prof
-# Should contain
-.env
-
