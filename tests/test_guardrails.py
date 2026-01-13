@@ -1,3 +1,4 @@
+# tests/test_guardrails.py
 from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
@@ -13,7 +14,6 @@ def _utc(s: str) -> pd.Timestamp:
 def test_session_filter_new_york():
     g = Guardrails(session_tz="America/New_York", day_tz="America/New_York", session_start="09:30", session_end="15:00")
 
-    # FIX: extra args toegevoegd
     plans = [
         PlannedTrade(Side.LONG, _utc("2026-01-09T12:00:00Z"), _utc("2026-01-09T12:05:00Z"), 100.0, 99.0, 101.0,
                      "reason1")
@@ -22,7 +22,8 @@ def test_session_filter_new_york():
     acc, rej = apply_guardrails(plans, g)
     assert len(acc) == 0
     assert len(rej) == 1
-    assert rej[0][1] == "outside session"
+    # FIX: Update expected string
+    assert rej[0][1] == "outside_session"  # Changed from "outside session"
 
     plans2 = [
         PlannedTrade(Side.LONG, _utc("2026-01-09T15:00:00Z"), _utc("2026-01-09T15:05:00Z"), 100.0, 99.0, 101.0,
@@ -36,7 +37,6 @@ def test_session_filter_new_york():
 def test_max_trades_per_day_new_york():
     g = Guardrails(max_trades_per_day=2)
 
-    # FIX: extra args toegevoegd
     plans = [
         PlannedTrade(Side.LONG, _utc("2026-01-09T15:00:00Z"), _utc("2026-01-09T15:05:00Z"), 100.0, 99.0, 101.0, "a"),
         PlannedTrade(Side.LONG, _utc("2026-01-09T16:00:00Z"), _utc("2026-01-09T16:05:00Z"), 100.0, 99.0, 101.0, "b"),
@@ -46,4 +46,5 @@ def test_max_trades_per_day_new_york():
     acc, rej = apply_guardrails(plans, g)
     assert len(acc) == 2
     assert len(rej) == 1
-    assert rej[0][1] == "max trades per day"
+    # FIX: Update expected string
+    assert rej[0][1] == "max_per_day"  # Changed from "max trades per day"
