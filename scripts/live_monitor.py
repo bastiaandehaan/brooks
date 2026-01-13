@@ -1,7 +1,7 @@
-# scripts/live_monitor.py
+#!/usr/bin/env python3
 """
-Live monitoring script - checks for Brooks signals every 5 minutes
-Sends notifications via Telegram when signals are found
+Brooks Live Monitor - Production Version
+Continuously monitors for trading signals during NY session
 """
 import sys
 import os
@@ -9,32 +9,37 @@ import time
 import logging
 import argparse
 from datetime import datetime
+from typing import Optional
+
 import pandas as pd
 import MetaTrader5 as mt5
 
-# Add parent directory to path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-root_dir = os.path.dirname(current_dir)
-sys.path.insert(0, root_dir)
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
-from strategies.context import TrendParams, Trend, infer_trend_m15
+from strategies.context import Trend, TrendParams, infer_trend_m15
 from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from strategies.regime import RegimeParams, should_trade_today
 from execution.guardrails import Guardrails, apply_guardrails
 from execution.risk_manager import RiskManager
-from execution.ftmo_guardian import FTMOGuardian, FTMORules, FTMOAccountType
+from execution.ftmo_guardian import FTMOGuardian, FTMOAccountType
 from utils.telegram_bot import TelegramBot, TradingSignal
 
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
 
+# Constants
 NY_TZ = "America/New_York"
+SESSION_START = "09:30"
+SESSION_END = "15:00"
+CHECK_INTERVAL = 300  # 5 minutes
 
 
 def is_ny_session_active() -> bool:
@@ -42,11 +47,23 @@ def is_ny_session_active() -> bool:
     now_ny = pd.Timestamp.now(tz=NY_TZ)
     current_time = now_ny.time()
 
-    # NY session: 09:30 - 15:00
-    session_start = pd.Timestamp("09:30").time()
-    session_end = pd.Timestamp("15:00").time()
+    start = pd.Timestamp(SESSION_START).time()
+    end = pd.Timestamp(SESSION_END).time()
 
-    return session_start <= current_time <= session_end
+    return start <= current_time <= end
+
+
+def check_emergency_stop() -> tuple[bool, Optional[str]]:
+    """Check if emergency stop file exists"""
+    stop_file = "STOP.txt"
+    if os.path.exists(stop_file):
+        try:
+            with open(stop_file, 'r') as f:
+                reason = f.read().strip()
+            return True, reason if reason else "Emergency stop activated"
+        except Exception:
+            return True, "Emergency stop file found"
+    return False, None
 
 
 def check_for_signals(
@@ -55,16 +72,13 @@ def check_for_signals(
         regime_filter: bool,
         chop_threshold: float,
         stop_buffer: float,
-        telegram_bot: TelegramBot,
-        ftmo_guardian: Optional[FTMOGuardian] = None,
-        daily_pnl: float = 0.0
+        ftmo_guardian: Optional[FTMOGuardian],
+        telegram_bot: TelegramBot
 ) -> bool:
-    """
-    Check for trading signals and send Telegram notification if found
+    """Check for trading signals and send notifications"""
 
-    Returns:
-        True if signal found and sent
-    """
+    logger.info("🔍 Checking for signals...")
+
     try:
         # Initialize MT5
         client = Mt5Client(mt5_module=mt5)
@@ -76,45 +90,64 @@ def check_for_signals(
         # Get symbol spec
         spec = client.get_symbol_specification(symbol)
         if spec is None:
-            logger.error(f"❌ Symbol {symbol} not found")
+            logger.error("❌ Symbol %s not found", symbol)
             client.shutdown()
             return False
 
         # Fetch data
-        logger.info(f"📊 Fetching data for {symbol}...")
-        m15 = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M15, 300))
-        m5 = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M5, 500))
+        req_m15 = RatesRequest(symbol, mt5.TIMEFRAME_M15, 300)
+        req_m5 = RatesRequest(symbol, mt5.TIMEFRAME_M5, 500)
 
-        if m15.empty or m5.empty:
-            logger.warning("⚠️ Empty data received")
+        try:
+            m15 = fetch_rates(mt5, req_m15)
+            m5 = fetch_rates(mt5, req_m5)
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch data: {e}")
+            telegram_bot.send_error(f"Data fetch failed: {str(e)}")
             client.shutdown()
             return False
 
-        # Check regime if enabled
-        regime_status = "⚠️ NOT FILTERED"
+        if m15.empty or m5.empty:
+            logger.warning("⚠️ Empty dataframes received")
+            client.shutdown()
+            return False
+
+        # Check regime filter
         if regime_filter:
             regime_params = RegimeParams(chop_threshold=chop_threshold)
             should_trade, regime_reason = should_trade_today(m15, regime_params)
 
             if not should_trade:
-                logger.info(f"⛔ {regime_reason}")
+                logger.info(f"⛔ Regime filter: {regime_reason}")
                 client.shutdown()
                 return False
 
-            regime_status = "✅ TRENDING"
-            logger.info(f"✅ {regime_reason}")
+            logger.info(f"✅ Regime filter: {regime_reason}")
+
+        # Check FTMO limits
+        if ftmo_guardian:
+            acc_info = mt5.account_info()
+            if acc_info:
+                current_balance = acc_info.balance
+                can_trade, limit_reason = ftmo_guardian.can_open_trade(current_balance)
+
+                if not can_trade:
+                    logger.warning(f"⛔ FTMO Guardian: {limit_reason}")
+                    telegram_bot.send_error(f"FTMO limit reached: {limit_reason}")
+                    client.shutdown()
+                    return False
 
         # Infer trend
-        trend_params = TrendParams(ema_period=20)
-        trend_res, metrics = infer_trend_m15(m15, trend_params)
+        t_params = TrendParams(ema_period=20)
+        trend_res, metrics = infer_trend_m15(m15, t_params)
 
         logger.info(
-            f"📈 Trend: {trend_res} (close={metrics.last_close:.2f}, "
-            f"ema={metrics.last_ema:.2f}, slope={metrics.ema_slope:.4f})"
+            "Trend: %s (close=%.2f ema=%.2f slope=%.2f)",
+            trend_res, metrics.last_close, metrics.last_ema, metrics.ema_slope
         )
 
         if trend_res not in [Trend.BULL, Trend.BEAR]:
-            logger.info("↔️ No clear trend - no signal")
+            logger.info("No clear trend")
             client.shutdown()
             return False
 
@@ -139,30 +172,11 @@ def check_for_signals(
         )
 
         if planned_trade is None:
-            logger.info("↔️ No signal found")
+            logger.info("No setup found")
             client.shutdown()
             return False
 
-        # Apply guardrails
-        g = Guardrails(
-            session_tz=NY_TZ,
-            day_tz=NY_TZ,
-            session_start="09:30",
-            session_end="15:00",
-            max_trades_per_day=2,
-        )
-
-        accepted, rejected = apply_guardrails([planned_trade], g)
-
-        if not accepted:
-            reason = rejected[0][1] if rejected else "Unknown"
-            logger.info(f"⛔ Signal rejected by guardrails: {reason}")
-            client.shutdown()
-            return False
-
-        trade = accepted[0]
-
-        # Calculate position size
+        # Risk management
         acc_info = mt5.account_info()
         if acc_info is None:
             logger.error("❌ Could not fetch account info")
@@ -173,95 +187,60 @@ def check_for_signals(
         lots = rm.calculate_lot_size(
             balance=acc_info.balance,
             spec=spec,
-            entry=trade.entry,
-            stop=trade.stop
+            entry=planned_trade.entry,
+            stop=planned_trade.stop
         )
 
+        # Guardrails
+        g = Guardrails(
+            session_tz=NY_TZ,
+            day_tz=NY_TZ,
+            session_start=SESSION_START,
+            session_end=SESSION_END,
+            max_trades_per_day=2,
+        )
+
+        accepted, rejected = apply_guardrails([planned_trade], g)
+
+        if rejected:
+            for _, reason in rejected:
+                logger.info(f"Guardrail reject: {reason}")
+            client.shutdown()
+            return False
+
+        if not accepted:
+            logger.info("No valid trades after guardrails")
+            client.shutdown()
+            return False
+
+        # Signal found! Send notification
+        pick = accepted[0]
         risk_usd = acc_info.balance * risk_pct / 100
 
-        # FTMO Guardian Check (if enabled)
-        if ftmo_guardian:
-            can_trade, ftmo_reason = ftmo_guardian.can_trade(
-                current_balance=acc_info.balance,
-                daily_pnl=daily_pnl,
-                open_risk=risk_usd
-            )
-
-            if not can_trade:
-                logger.error(f"🛡️ FTMO GUARDIAN BLOCKED TRADE: {ftmo_reason}")
-                telegram_bot.send_error(f"TRADE BLOCKED BY FTMO RULES:\n{ftmo_reason}")
-                client.shutdown()
-                return False
-
-            logger.info(f"✅ FTMO Guardian: {ftmo_reason}")
-
-        # Build signal
         signal = TradingSignal(
             symbol=symbol,
-            side=trade.side.value,
-            entry=trade.entry,
-            stop=trade.stop,
-            target=trade.tp,
+            side=pick.side.value,
+            entry=pick.entry,
+            stop=pick.stop,
+            tp=pick.tp,
             lots=lots,
             risk_usd=risk_usd,
-            risk_pct=risk_pct,
-            reason=trade.reason,
-            regime=regime_status
+            reason=pick.reason
         )
 
-        # Send to Telegram
-        logger.info(f"📤 Sending {trade.side.value} signal to Telegram...")
-        success = telegram_bot.send_signal(signal)
+        telegram_bot.send_signal(signal)
 
-        if success:
-            logger.info("✅ Signal sent successfully!")
-
-            # Also print to console
-            print("\n" + "!" * 60)
-            print(f" 🎯 SIGNAL FOUND & SENT TO TELEGRAM")
-            print(f" Symbol    : {symbol}")
-            print(f" Direction : {trade.side.value}")
-            print(f" Entry     : {trade.entry:.2f}")
-            print(f" Stop      : {trade.stop:.2f}")
-            print(f" Target    : {trade.tp:.2f}")
-            print(f" Lots      : {lots:.2f}")
-            print(f" Risk      : ${risk_usd:.2f} ({risk_pct}%)")
-            print(f" Regime    : {regime_status}")
-            print("!" * 60 + "\n")
-        else:
-            logger.error("❌ Failed to send Telegram notification")
+        logger.info("✅ Signal sent: %s @ %.2f", pick.side, pick.entry)
 
         client.shutdown()
-        return success
+        return True
 
     except Exception as e:
-        logger.error(f"❌ Error checking signals: {e}")
-
-        # Capture full error context for debugging
+        logger.error(f"❌ Error checking signals: {e}", exc_info=True)
         try:
-            error_context = capture_error_context(
-                error=e,
-                market_data=m5 if 'm5' in locals() else None,
-                config={
-                    "symbol": symbol,
-                    "risk_pct": risk_pct,
-                    "regime_filter": regime_filter,
-                    "chop_threshold": chop_threshold,
-                    "stop_buffer": stop_buffer,
-                },
-                system_state={
-                    "function": "check_for_signals",
-                    "time": datetime.now().isoformat(),
-                }
-            )
-            debug_logger.log_error(error_context)
-        except:
-            pass  # Don't let debug logging crash the system
-
-        try:
-            telegram_bot.send_error(f"Signal check error: {str(e)}")
-        except:
-            pass
+            telegram_bot.send_error(f"Error: {str(e)}")
+        except Exception:
+            pass  # Telegram notification failed, but log already written
         return False
 
 
@@ -271,53 +250,26 @@ def run_monitor(
         regime_filter: bool,
         chop_threshold: float,
         stop_buffer: float,
-        check_interval: int = 300,  # 5 minutes
-        enable_ftmo_protection: bool = True,
-        ftmo_account_size: float = 10000.0
-):
-    """
-    Main monitoring loop
+        check_interval: int,
+        enable_ftmo_protection: bool,
+        ftmo_account_size: int
+) -> None:
+    """Main monitoring loop"""
 
-    Args:
-        symbol: Trading symbol
-        risk_pct: Risk per trade (%)
-        regime_filter: Enable regime filter
-        chop_threshold: Chop threshold
-        stop_buffer: Stop buffer
-        check_interval: Seconds between checks (default 300 = 5 min)
-    """
-    logger.info("=" * 60)
-    logger.info("🤖 BROOKS LIVE MONITOR STARTING")
-    logger.info("=" * 60)
-    logger.info(f"Symbol           : {symbol}")
-    logger.info(f"Risk per trade   : {risk_pct}%")
-    logger.info(f"Regime filter    : {'ENABLED' if regime_filter else 'DISABLED'}")
-    if regime_filter:
-        logger.info(f"Chop threshold   : {chop_threshold}")
-    logger.info(f"Stop buffer      : {stop_buffer}")
-    logger.info(f"Check interval   : {check_interval}s ({check_interval / 60:.1f} min)")
-    logger.info(f"NY Session hours : 09:30-15:00 EST")
-    logger.info(f"FTMO Protection  : {'ENABLED' if enable_ftmo_protection else 'DISABLED'}")
-    logger.info("=" * 60 + "\n")
+    # Initialize components
+    telegram_bot = TelegramBot()
 
-    # Initialize Telegram bot
-    try:
-        telegram_bot = TelegramBot()
-        logger.info("✅ Telegram bot connected")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Telegram bot: {e}")
-        logger.error("Check your .env file has TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
-        return
-
-    # Initialize FTMO Guardian (if enabled)
-    ftmo_guardian = None
+    ftmo_guardian: Optional[FTMOGuardian] = None
     if enable_ftmo_protection:
-        rules = FTMORules.for_10k_challenge() if ftmo_account_size == 10000 else FTMORules(
-            account_type=FTMOAccountType.CHALLENGE_10K,
-            initial_balance=ftmo_account_size
-        )
-        ftmo_guardian = FTMOGuardian(rules)
-        logger.info("✅ FTMO Guardian enabled")
+        account_type = FTMOAccountType.CHALLENGE_10K if ftmo_account_size == 10000 else FTMOAccountType.CHALLENGE_25K
+        ftmo_guardian = FTMOGuardian(account_type=account_type)
+        logger.info("FTMO Guardian initialized:")
+        logger.info(f"  Account Type: {ftmo_account_size // 1000}k")
+        logger.info(f"  Initial Balance: ${ftmo_guardian.rules.initial_balance:,.2f}")
+        logger.info(f"  Max Daily Loss: ${ftmo_guardian.rules.max_daily_loss:,.2f} (HARD LIMIT)")
+        logger.info(f"  Safe Daily Loss: ${ftmo_guardian.safe_daily_loss:,.2f} (with buffer)")
+        logger.info(f"  Max Total Loss: ${ftmo_guardian.rules.max_total_loss:,.2f} (HARD LIMIT)")
+        logger.info(f"  Safe Total Loss: ${ftmo_guardian.safe_total_loss:,.2f} (with buffer)")
 
     # Send startup notification
     startup_msg = (
@@ -327,84 +279,104 @@ def run_monitor(
         f"Regime Filter: {'ON' if regime_filter else 'OFF'}\n"
     )
     if ftmo_guardian:
-        startup_msg += f"🛡️ FTMO Protection: ENABLED\n"
-    startup_msg += "Monitoring NY session (09:30-15:00 EST)"
+        startup_msg += f"FTMO Protection: ENABLED ({ftmo_account_size // 1000}k account)\n"
 
-    telegram_bot.send_message(startup_msg)
+    telegram_bot.send_message(startup_msg)  # FIXED: use send_message, not _send_message
+    logger.info("✅ FTMO Guardian enabled" if ftmo_guardian else "⚠️ FTMO Guardian disabled")
 
-    iteration = 0
-    last_signal_time = None
-    daily_pnl = 0.0  # Track daily P&L (reset at midnight)
+    # Main loop
+    while True:
+        try:
+            # Check emergency stop
+            stop_requested, stop_reason = check_emergency_stop()
+            if stop_requested:
+                msg = f"🛑 Emergency stop triggered: {stop_reason}"
+                logger.warning(msg)
+                telegram_bot.send_error(msg)
+                break
 
-    try:
-        while True:
-            iteration += 1
-            now = datetime.now()
-
-            # Check if in NY session
+            # Check if in session
             if not is_ny_session_active():
                 logger.info(f"⏸️ Outside NY session - sleeping {check_interval}s...")
                 time.sleep(check_interval)
                 continue
 
-            logger.info(f"\n{'=' * 60}")
-            logger.info(f"🔍 CHECK #{iteration} - {now.strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info(f"{'=' * 60}")
-
             # Check for signals
-            found = check_for_signals(
+            check_for_signals(
                 symbol=symbol,
                 risk_pct=risk_pct,
                 regime_filter=regime_filter,
                 chop_threshold=chop_threshold,
                 stop_buffer=stop_buffer,
-                telegram_bot=telegram_bot,
                 ftmo_guardian=ftmo_guardian,
-                daily_pnl=daily_pnl
+                telegram_bot=telegram_bot
             )
 
-            if found:
-                last_signal_time = now
-
             # Sleep until next check
-            logger.info(f"💤 Sleeping {check_interval}s until next check...\n")
+            logger.info(f"💤 Sleeping {check_interval}s until next check...")
             time.sleep(check_interval)
 
-    except KeyboardInterrupt:
-        logger.info("\n⛔ Monitor stopped by user")
-        telegram_bot._send_message("⛔ <b>Brooks Live Monitor Stopped</b>")
-    except Exception as e:
-        logger.error(f"\n❌ Monitor crashed: {e}")
-        telegram_bot.send_error(f"Monitor crashed: {str(e)}")
+        except KeyboardInterrupt:
+            logger.info("⚠️ Keyboard interrupt - stopping monitor")
+            telegram_bot.send_message("🛑 Monitor stopped manually")
+            break
+        except Exception as e:
+            logger.error(f"❌ Unexpected error in main loop: {e}", exc_info=True)
+            telegram_bot.send_error(f"Monitor error: {str(e)}")
+            time.sleep(60)  # Wait 1 minute before retrying
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Brooks Live Signal Monitor")
-    parser.add_argument("--symbol", default="US500.cash", help="Trading symbol")
-    parser.add_argument("--risk-pct", type=float, default=0.5,
-                        help="Risk per trade (%%)")
-    parser.add_argument("--regime-filter", action="store_true",
-                        help="Enable regime filter")
-    parser.add_argument("--chop-threshold", type=float, default=2.0,
-                        help="Chop threshold")
-    parser.add_argument("--stop-buffer", type=float, default=1.0,
-                        help="Stop buffer")
-    parser.add_argument("--interval", type=int, default=300,
-                        help="Check interval in seconds (default: 300 = 5min)")
-    parser.add_argument("--ftmo-protection", action="store_true", default=True,
-                        help="Enable FTMO rule protection (default: enabled)")
-    parser.add_argument("--ftmo-account-size", type=float, default=10000.0,
-                        help="FTMO account size for risk limits")
+def main() -> None:
+    """Entry point"""
+
+    parser = argparse.ArgumentParser(description="Brooks Live Monitor")
+    parser.add_argument("--symbol", default="US500.cash")
+    parser.add_argument("--risk-pct", type=float, default=0.5)
+    parser.add_argument("--regime-filter", action="store_true")
+    parser.add_argument("--chop-threshold", type=float, default=2.0)
+    parser.add_argument("--stop-buffer", type=float, default=1.0)
+    parser.add_argument("--check-interval", type=int, default=300)
+    parser.add_argument("--ftmo-protection", action="store_true")
+    parser.add_argument("--ftmo-account-size", type=int, default=10000, choices=[10000, 25000])
 
     args = parser.parse_args()
 
+    # Print startup info
+    logger.info("=" * 60)
+    logger.info("🤖 BROOKS LIVE MONITOR STARTING")
+    logger.info("=" * 60)
+    logger.info(f"Symbol           : {args.symbol}")
+    logger.info(f"Risk per trade   : {args.risk_pct}%")
+    logger.info(f"Regime filter    : {'ENABLED' if args.regime_filter else 'DISABLED'}")
+    if args.regime_filter:
+        logger.info(f"Chop threshold   : {args.chop_threshold}")
+    logger.info(f"Stop buffer      : {args.stop_buffer}")
+    logger.info(f"Check interval   : {args.check_interval}s ({args.check_interval / 60:.1f} min)")
+    logger.info(f"NY Session hours : {SESSION_START}-{SESSION_END} EST")
+    logger.info(f"FTMO Protection  : {'ENABLED' if args.ftmo_protection else 'DISABLED'}")
+    logger.info("=" * 60)
+
+    # Test Telegram connection
+    try:
+        telegram_bot = TelegramBot()
+        telegram_bot.send_message("🔌 Testing connection...")
+        logger.info("✅ Telegram bot connected")
+    except Exception as e:
+        logger.error(f"❌ Telegram bot connection failed: {e}")
+        return
+
+    # Run monitor
     run_monitor(
         symbol=args.symbol,
         risk_pct=args.risk_pct,
         regime_filter=args.regime_filter,
         chop_threshold=args.chop_threshold,
         stop_buffer=args.stop_buffer,
-        check_interval=args.interval,
+        check_interval=args.check_interval,
         enable_ftmo_protection=args.ftmo_protection,
         ftmo_account_size=args.ftmo_account_size
     )
+
+
+if __name__ == "__main__":
+    main()
