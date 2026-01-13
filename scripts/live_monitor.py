@@ -8,7 +8,6 @@ import os
 import time
 import logging
 import argparse
-from typing import Optional
 from datetime import datetime
 import pandas as pd
 import MetaTrader5 as mt5
@@ -237,6 +236,28 @@ def check_for_signals(
 
     except Exception as e:
         logger.error(f"❌ Error checking signals: {e}")
+
+        # Capture full error context for debugging
+        try:
+            error_context = capture_error_context(
+                error=e,
+                market_data=m5 if 'm5' in locals() else None,
+                config={
+                    "symbol": symbol,
+                    "risk_pct": risk_pct,
+                    "regime_filter": regime_filter,
+                    "chop_threshold": chop_threshold,
+                    "stop_buffer": stop_buffer,
+                },
+                system_state={
+                    "function": "check_for_signals",
+                    "time": datetime.now().isoformat(),
+                }
+            )
+            debug_logger.log_error(error_context)
+        except:
+            pass  # Don't let debug logging crash the system
+
         try:
             telegram_bot.send_error(f"Signal check error: {str(e)}")
         except:
