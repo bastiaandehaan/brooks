@@ -6,17 +6,29 @@ dependencies = [
   "MetaTrader5",
   "pandas",
   "numpy",
+  "PyYAML",
+  "matplotlib",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest",
+  "pytest-cov",
   "ruff",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-q"
 
 [tool.ruff]
 line-length = 110
 target-version = "py310"
+exclude = [
+  ".venv",
+  "_export",
+  "_llm_export",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
