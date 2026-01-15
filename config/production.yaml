@@ -1,0 +1,39 @@
+# config/conservative.yaml
+# Brooks Trading Bot - Conservative Configuration
+# Stricter filters = fewer trades but higher quality
+
+symbol: US500.cash
+
+regime:
+  enabled: true
+  chop_threshold: 2.5  # Stricter than production (2.5 vs 2.0)
+
+trend:
+  ema_period: 20
+  min_slope: 0.20      # Only strong trends (0.20 vs 0.15)
+
+h2l2:
+  pullback_bars: 3
+  signal_close_frac: 0.25  # Signal must close in best 25% (vs 30%)
+  min_risk_price_units: 2.5  # Larger minimum risk (2.5 vs 2.0)
+  stop_buffer: 1.5     # Wider stops (1.5 vs 1.0)
+  cooldown_bars: 2     # Wait 2 bars between trades
+
+guardrails:
+  session_tz: America/New_York
+  day_tz: America/New_York
+  session_start: "10:00"  # Skip first 30min (avoid open volatility)
+  session_end: "15:30"    # Exit earlier (avoid close volatility)
+  max_trades_day: 1       # Only 1 trade per day
+
+risk:
+  risk_pct: 0.3  # Lower risk (0.3% vs 0.5%)
+
+costs:
+  per_trade_r: 0.04
+
+# Expected characteristics:
+# - Fewer trades (~50% less than production)
+# - Higher win rate (fewer setups = higher quality)
+# - Lower drawdown
+# - Similar or slightly better Sharpe

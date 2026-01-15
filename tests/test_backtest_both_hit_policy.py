@@ -27,7 +27,7 @@ def test_both_hit_same_bar_is_worst_case_loss_long():
 
     t = DummyTrade(execute_ts=idx[0], side=Side.LONG, stop=99.0, tp=101.0)
     out = _simulate_trade_outcome(m5, t)
-    assert out == -1.0
+    assert out[0] == -1.0
 
 
 def test_both_hit_same_bar_is_worst_case_loss_short():
@@ -44,4 +44,4 @@ def test_both_hit_same_bar_is_worst_case_loss_short():
 
     t = DummyTrade(execute_ts=idx[0], side=Side.SHORT, stop=101.0, tp=99.0)
     out = _simulate_trade_outcome(m5, t)
-    assert out == -1.0
+    assert out[0] == -1.0

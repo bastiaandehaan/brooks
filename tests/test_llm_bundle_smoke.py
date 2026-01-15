@@ -4,8 +4,8 @@ from pathlib import Path
 
 def test_make_llm_bundle_creates_outputs():
     root = Path.cwd()
-    script = root / "scripts" / "make_llm_bundle.ps1"
-    assert script.exists(), "make_llm_bundle.ps1 missing"
+    script = root / ""bundle_repo.py"
+    assert script.exists(), "bundle_repo.py missing"
 
     cmd = [
         "powershell",

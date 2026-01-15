@@ -90,3 +90,8 @@ pyfiles.txt
 all_code_dump.txt
 
 *.prof
+
+full_repository_bundle.txt
+backtest/optimization_results.csv
+knobs_and_mismatches.json
+logs_test/

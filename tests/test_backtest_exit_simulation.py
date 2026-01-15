@@ -30,4 +30,4 @@ def test_exit_includes_execute_bar_sl_hit():
     )
     t = DummyTrade(execute_ts=idx[0], side=Side.LONG, stop=99.5, tp=102.0)
     out = _simulate_trade_outcome(m5, t)
-    assert out == -1.0
+    assert out[0] == -1.0

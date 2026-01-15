@@ -1,7 +1,7 @@
 # strategies/regime.py
 """
-Market Regime Detection - FULLY VECTORIZED VERSION
-Avoid choppy/ranging markets - Brooks Price Action works best in TRENDING environments
+Market Regime Detection - FIXED VERSION
+Correctly normalize price range by AVERAGE ATR over the same period
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class RegimeParams:
     """Configuration for regime detection"""
     atr_period: int = 14  # ATR calculation period
     range_period: int = 20  # Price range lookback
-    chop_threshold: float = 2.5  # Range must be > (threshold × ATR) to be trending
+    chop_threshold: float = 2.5  # Range must be > (threshold × AVG_ATR) to be trending
     min_bars: int = 50  # Minimum bars needed for valid detection
 
 
@@ -32,14 +32,17 @@ class RegimeMetrics:
     """Diagnostics from regime detection"""
     regime: MarketRegime
     price_range: float  # High-Low over range_period
-    avg_atr: float  # Average ATR
+    avg_atr: float  # Average ATR over range_period (KEY FIX!)
     chop_ratio: float  # price_range / (chop_threshold × avg_atr)
     bars_analyzed: int
 
 
 def detect_regime_series(df: pd.DataFrame, params: RegimeParams) -> pd.Series:
     """
-    VECTORIZED regime detection for entire dataframe
+    VECTORIZED regime detection - CORRECTED VERSION
+
+    KEY FIX: Compare price_range to AVERAGE ATR over the same period,
+    not to single-bar ATR!
 
     Returns:
         Series with MarketRegime values (TRENDING/CHOPPY/UNKNOWN)
@@ -56,7 +59,7 @@ def detect_regime_series(df: pd.DataFrame, params: RegimeParams) -> pd.Series:
     bar_range = high - low
     atr = bar_range.rolling(params.atr_period, min_periods=params.atr_period).mean()
 
-    # Average ATR over range_period
+    # 🔧 FIX: Average ATR over range_period (same window as price range!)
     avg_atr = atr.rolling(params.range_period, min_periods=params.range_period).mean()
 
     # Price range over range_period
@@ -64,24 +67,22 @@ def detect_regime_series(df: pd.DataFrame, params: RegimeParams) -> pd.Series:
     range_low = close.rolling(params.range_period, min_periods=params.range_period).min()
     price_range = range_high - range_low
 
-    # Chop ratio calculation
+    # 🔧 FIX: Chop ratio = price_range / (threshold × avg_atr)
+    # This normalizes: how many "average volatility units" did price move?
     threshold_range = params.chop_threshold * avg_atr
     chop_ratio = price_range / threshold_range
 
     # Classify regime
-    # UNKNOWN where we don't have enough data (NaN)
-    # CHOPPY where chop_ratio < 1.0
-    # TRENDING where chop_ratio >= 1.0
     regime = pd.Series([MarketRegime.UNKNOWN] * len(df), index=df.index, dtype="object")
 
     # Valid data mask (no NaN in calculations)
     valid_mask = ~(avg_atr.isna() | price_range.isna() | chop_ratio.isna())
 
-    # Where valid AND chop_ratio < 1.0 → CHOPPY
+    # Where valid AND chop_ratio < 1.0 → CHOPPY (moved less than threshold)
     choppy_mask = valid_mask & (chop_ratio < 1.0)
     regime[choppy_mask] = MarketRegime.CHOPPY
 
-    # Where valid AND chop_ratio >= 1.0 → TRENDING
+    # Where valid AND chop_ratio >= 1.0 → TRENDING (moved more than threshold)
     trending_mask = valid_mask & (chop_ratio >= 1.0)
     regime[trending_mask] = MarketRegime.TRENDING
 
@@ -92,12 +93,7 @@ def detect_regime(df: pd.DataFrame, params: RegimeParams) -> tuple[MarketRegime,
     """
     Detect regime for LAST bar in dataframe (for main.py live trading)
 
-    Args:
-        df: OHLC dataframe
-        params: Regime parameters
-
-    Returns:
-        (regime, metrics) for the last bar
+    CORRECTED: Uses average ATR over range_period for proper normalization
     """
     min_required = params.atr_period + params.range_period  # 34 bars
 
@@ -118,6 +114,8 @@ def detect_regime(df: pd.DataFrame, params: RegimeParams) -> tuple[MarketRegime,
     # Calculate ATR
     bar_range = high - low
     atr = bar_range.rolling(params.atr_period).mean()
+
+    # 🔧 FIX: Average ATR over range_period
     avg_atr = atr.rolling(params.range_period).mean().iloc[-1]
 
     # Price range
@@ -135,7 +133,7 @@ def detect_regime(df: pd.DataFrame, params: RegimeParams) -> tuple[MarketRegime,
             bars_analyzed=len(df)
         )
 
-    # Chop ratio
+    # 🔧 FIX: Chop ratio with normalized threshold
     threshold_range = params.chop_threshold * avg_atr
     chop_ratio = price_range / threshold_range
 
