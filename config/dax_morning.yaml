@@ -1,0 +1,23 @@
+# In je config/dax_morning.yaml
+symbol: GER40.cash  # Of DAX futures bij jouw broker
+
+regime:
+  enabled: true
+  chop_threshold: 2.5  # Filter choppy openings
+
+trend:
+  ema_period: 20
+  min_slope: 0.15
+
+h2l2:
+  pullback_bars: 3
+  signal_close_frac: 0.30  # Tom's "close near extreme"
+
+guardrails:
+  session_tz: Europe/Brussels
+  session_start: "08:30"  # Na opening volatility
+  session_end: "12:00"    # Voor lunch dip
+  max_trades_day: 2       # Conservatief
+
+risk:
+  risk_pct: 0.5  # 0.5% per trade

@@ -1,8 +1,0 @@
-{
-  "timestamp": "2026-01-13T14:58:27.223433",
-  "session_id": "20260113_145827",
-  "python_version": "3.14.2 (tags/v3.14.2:df79316, Dec  5 2025, 17:18:21) [MSC v.1944 64 bit (AMD64)]",
-  "market_data_rows": 3,
-  "market_data_file": "logs_test\\snapshots\\20260113_145827\\market_data.csv",
-  "trades_count": 2
-}
