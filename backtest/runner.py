@@ -30,6 +30,8 @@ from strategies.context import TrendParams, Trend, infer_trend_m15_series
 from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side, PlannedTrade
 from strategies.regime import RegimeParams, detect_regime_series, MarketRegime
 from execution.guardrails import Guardrails, apply_guardrails
+from strategies.config import StrategyConfig
+config = StrategyConfig.from_yaml("config/production.yaml")
 
 # Suppress guardrail spam logging
 import logging as _log

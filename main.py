@@ -19,7 +19,8 @@ from strategies.regime import MarketRegime, RegimeParams, should_trade_today
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import fetch_rates, RatesRequest
 from execution.risk_manager import RiskManager
-
+from strategies.config import StrategyConfig
+config = StrategyConfig.from_yaml("config/production.yaml")
 logger = logging.getLogger(__name__)
 
 

@@ -1,39 +1,44 @@
-# config/conservative.yaml
+# config/production.yaml
 # Brooks Trading Bot - Conservative Configuration
-# Stricter filters = fewer trades but higher quality
+# Designed for high-quality setups with stricter filters.
+# Doel: FTMO Challenge compliance door drawdown minimalisatie.
 
 symbol: US500.cash
 
 regime:
   enabled: true
-  chop_threshold: 2.5  # Stricter than production (2.5 vs 2.0)
+  chop_threshold: 2.5  # Stricter filter: Range must be > 2.5x ATR to trade
+                       # Filtert zijwaartse markten agressief uit.
 
 trend:
-  ema_period: 20
-  min_slope: 0.20      # Only strong trends (0.20 vs 0.15)
+  ema_period: 20       # Standaard Brooks 20-period EMA op M15
+  min_slope: 0.20      # Vereist sterker momentum (0.20 vs standaard 0.15)
+                       # Voorkomt trades in zwakke drifts.
 
 h2l2:
-  pullback_bars: 3
-  signal_close_frac: 0.25  # Signal must close in best 25% (vs 30%)
-  min_risk_price_units: 2.5  # Larger minimum risk (2.5 vs 2.0)
-  stop_buffer: 1.5     # Wider stops (1.5 vs 1.0)
-  cooldown_bars: 2     # Wait 2 bars between trades
+  pullback_bars: 3     # Standaard Brooks pullback telling
+  signal_close_frac: 0.25  # Signaal bar moet sluiten in de extreme 25%
+                           # Bewijs van sterke rejection.
+  min_risk_price_units: 2.5  # Minimale stop afstand (punten) voor betekenisvolle range
+  stop_buffer: 1.5     # Ruimere buffer (1.5pts) om stop-hunts te overleven
+  cooldown_bars: 2     # Wacht 2 bars na een trade alvorens opnieuw te scannen
 
 guardrails:
   session_tz: America/New_York
   day_tz: America/New_York
-  session_start: "10:00"  # Skip first 30min (avoid open volatility)
-  session_end: "15:30"    # Exit earlier (avoid close volatility)
-  max_trades_day: 1       # Only 1 trade per day
+  session_start: "10:00"  # Sla de eerste 30 min van de sessie over (openingsvolatiliteit)
+  session_end: "15:30"    # Stop 30 min voor sluiting (vermijd MOC chaos)
+  max_trades_day: 1       # Focus op de allerbeste setup per dag (Sniper approach)
 
 risk:
-  risk_pct: 0.3  # Lower risk (0.3% vs 0.5%)
+  risk_pct: 0.3  # Conservatieve sizing: 0.3% account risk per trade
+                 # Beschermt tegen consecutive losses in FTMO challenge.
 
 costs:
-  per_trade_r: 0.04
+  per_trade_r: 0.04 # Geschatte slippage + spread impact per trade in R-units
+                    # Realistische backtest verwachting.
 
-# Expected characteristics:
-# - Fewer trades (~50% less than production)
-# - Higher win rate (fewer setups = higher quality)
-# - Lower drawdown
-# - Similar or slightly better Sharpe
+# Performance Expectations:
+# - Lagere handelsfrequentie (~50% van standaard instellingen)
+# - Hogere win rate doelstelling door strengere trend en signaal filters
+# - Ontworpen om prop firm challenges te doorstaan via stabiliteit.
