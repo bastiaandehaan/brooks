@@ -1,9 +1,0 @@
-{
-    "timestamp": "2026-01-15T20:58:20.893752",
-    "error_type": "ValueError",
-    "error_message": "Test error for debugging",
-    "stack_trace": "NoneType: None\n",
-    "system_state": {
-        "market_data": false
-    }
-}
