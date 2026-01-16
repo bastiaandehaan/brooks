@@ -1,0 +1,9 @@
+{
+    "timestamp": "2026-01-15T20:57:05.144123",
+    "error_type": "ConnectionError",
+    "error_message": "MT5 connection lost during signal check",
+    "stack_trace": "Traceback (most recent call last):\n  File \"C:\\Users\\basti\\PycharmProjects\\brookscopy\\tests\\test_debug_system.py\", line 27, in test_error_logging\nConnectionError: MT5 connection lost during signal check\n",
+    "system_state": {
+        "market_data": true
+    }
+}

@@ -1,0 +1,12 @@
+[
+    {
+        "side": "LONG",
+        "entry": 5845,
+        "result": "+2R"
+    },
+    {
+        "side": "SHORT",
+        "entry": 5850,
+        "result": "-1R"
+    }
+]

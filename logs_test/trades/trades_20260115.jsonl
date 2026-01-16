@@ -1,0 +1,6 @@
+{"timestamp": "2026-01-15T21:01:35.763558", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-15T21:01:35.763573", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-15T21:01:35.763576", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-15T21:19:04.175989", "side": "LONG", "entry": 5847.5, "stop": 5845.0, "tp": 5852.5, "result": "+2.0R", "pnl": 100.0}
+{"timestamp": "2026-01-15T21:19:04.175999", "side": "SHORT", "entry": 5850.0, "stop": 5852.0, "tp": 5846.0, "result": "-1.0R", "pnl": -50.0}
+{"timestamp": "2026-01-15T21:19:04.176002", "side": "LONG", "entry": 5845.0, "stop": 5843.0, "tp": 5849.0, "result": "+2.0R", "pnl": 100.0}
