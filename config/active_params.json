@@ -1,0 +1,14 @@
+{
+  "symbol": "US500.cash",
+  "ema_period": 15,
+  "min_slope": 0.10,
+  "pullback_bars": 3,
+  "signal_close_frac": 0.20,
+  "regime_filter": false,
+  "chop_threshold": 2.5,
+  "max_trades_day": 1,
+  "stop_buffer": 1.0,
+  "min_risk_price_units": 1.5,
+  "risk_pct": 0.5,
+  "costs_per_trade_r": 0.04
+}
