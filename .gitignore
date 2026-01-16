@@ -88,6 +88,7 @@ llm_dump.txt
 llm_bundle.zip
 pyfiles.txt
 all_code_dump.txt
+*.png
 
 *.prof
 
