@@ -1,97 +1,75 @@
-# ============================================================
+# =========================
 # Python
-# ============================================================
+# =========================
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Unit test / coverage
-.pytest_cache/
-.coverage
-coverage.xml
-htmlcov/
-nosetests.xml
-test-results/
+# Virtual environments
+.venv/
+venv/
+.env/
+.ENV/
 
-# Type check / lint / format caches
-.mypy_cache/
-.pyre/
-.pytype/
-.ruff_cache/
-.cache/
-
-# Build / packaging
+# Packaging / build
 build/
 dist/
 *.egg-info/
 .eggs/
-wheels/
 pip-wheel-metadata/
+*.whl
 
-# Jupyter / IPython
+# Test / tooling caches
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.pytype/
+.hypothesis/
+.dmypy.json
+.pyre/
+
+# Jupyter
 .ipynb_checkpoints/
-.profile_default/
-ipython_config.py
 
-# ============================================================
-# Virtual environments
-# ============================================================
-.venv/
-venv/
-env/
-ENV/
-
-# ============================================================
-# Logs / runtime artifacts
-# ============================================================
-*.log
-logs/
-*.sqlite3
-
-# ============================================================
-# OS junk
-# ============================================================
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# ============================================================
-# IDE / editors
-# ============================================================
+# =========================
+# JetBrains / IDE
+# =========================
 .idea/
 *.iml
-.vscode/
-*.code-workspace
 
-# ============================================================
-# Secrets (NEVER COMMIT!)
-# ============================================================
-.env
-.env.local
-.env.*.local
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# ============================================================
-# Project-specific generated outputs
-# ============================================================
-backtest_report_*.png
-optimal_config.json
-trade_log_*.json
-daily_stats_*.json
-
-# ============================================================
-# LLM / export helpers (avoid export-in-export recursion!)
-# ============================================================
-_export/
-_llm_export/
-llm_dump.txt
-llm_bundle.zip
-pyfiles.txt
-all_code_dump.txt
-
-*.prof
-
-full_repository_bundle.txt
-backtest/optimization_results.csv
-knobs_and_mismatches.json
+# =========================
+# Project outputs (brooks)
+# =========================
+outputs/
+logs/
 logs_test/
+PNG/
+resultaat/
+
+# Bundles / snapshots
+*repository_bundle*.txt
+full_repository_bundle*.txt
+
+# Generated configs / optim results
+optimal_config*.json
+scripts/optimal_config*.json
+
+# If you have local secrets
+*.env
+config/local*.yaml
+config/local*.yml
+
+backtest/backtest_png/
+backtest_png/
