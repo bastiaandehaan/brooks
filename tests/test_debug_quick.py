@@ -3,9 +3,9 @@
 Quick test for debug logging system
 Run this to verify everything works before live trading
 """
-import sys
+
 import os
-from pathlib import Path
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,10 +30,7 @@ except Exception as e:
 print("\n2️⃣ Testing error logging...")
 try:
     test_error = ValueError("Test error for debugging")
-    context = capture_error_context(
-        test_error,
-        config={"test": "configuration"}
-    )
+    context = capture_error_context(test_error, config={"test": "configuration"})
     logger.log_error(context)
 
     # Check if files were created
@@ -56,7 +53,7 @@ try:
         "stop": 5845.0,
         "tp": 5852.5,
         "result_r": 2.0,
-        "pnl": 100.0
+        "pnl": 100.0,
     }
     logger.log_trade(test_trade)
 
@@ -77,7 +74,7 @@ try:
         "timestamp": "2026-01-13T15:00:00",
         "balance": 10000,
         "daily_pnl": 0,
-        "trades_today": 0
+        "trades_today": 0,
     }
     logger.save_snapshot(test_snapshot)
 

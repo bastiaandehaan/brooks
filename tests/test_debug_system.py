@@ -3,15 +3,18 @@
 Test Debug Logging System
 Verifies all logging functionality works correctly
 """
-import sys
+
 import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.debug_logger import DebugLogger, capture_error_context
 from datetime import datetime
+
 import pandas as pd
+
+from utils.debug_logger import DebugLogger, capture_error_context
 
 
 def test_error_logging():
@@ -27,9 +30,11 @@ def test_error_logging():
         raise ConnectionError("MT5 connection lost during signal check")
     except Exception as e:
         # Create fake market data
-        fake_data = pd.DataFrame({
-            'close': [5845, 5847, 5850, 5848, 5846],
-        })
+        fake_data = pd.DataFrame(
+            {
+                "close": [5845, 5847, 5850, 5848, 5846],
+            }
+        )
 
         context = capture_error_context(
             error=e,
@@ -45,20 +50,20 @@ def test_error_logging():
                 "daily_pnl": -150,
                 "trades_today": 3,
                 "time": datetime.now().isoformat(),
-            }
+            },
         )
 
         error_path = debug.log_error(context)
 
         # Verify files created
         assert error_path.exists(), "JSON error log not created"
-        assert error_path.with_suffix('.txt').exists(), "TXT error log not created"
+        assert error_path.with_suffix(".txt").exists(), "TXT error log not created"
 
         print(f"✅ Error log created: {error_path}")
         print(f"✅ Readable report: {error_path.with_suffix('.txt')}")
 
         # Show first few lines of readable report
-        with open(error_path.with_suffix('.txt')) as f:
+        with open(error_path.with_suffix(".txt")) as f:
             lines = f.readlines()[:15]
         print("\n📄 Report preview:")
         print("".join(lines))
@@ -102,7 +107,7 @@ def test_trade_logging():
             "tp": 5849.00,
             "result": "+2.0R",
             "pnl": 100.00,
-        }
+        },
     ]
 
     for trade in trades:
@@ -119,7 +124,7 @@ def test_trade_logging():
         lines = f.readlines()
 
     print(f"✅ Logged {len(lines)} trades to {trade_file}")
-    print(f"✅ Trade log format: JSONL (one trade per line)")
+    print("✅ Trade log format: JSONL (one trade per line)")
 
     # Show first trade
     print("\n📊 First trade:")
@@ -137,12 +142,15 @@ def test_snapshot():
     debug = DebugLogger(log_dir="logs_test")
 
     # Create fake data
-    fake_market_data = pd.DataFrame({
-        'open': [5840, 5842, 5845],
-        'high': [5842, 5847, 5850],
-        'low': [5838, 5841, 5844],
-        'close': [5841, 5846, 5848],
-    }, index=pd.date_range('2026-01-13 14:00', periods=3, freq='5min'))
+    fake_market_data = pd.DataFrame(
+        {
+            "open": [5840, 5842, 5845],
+            "high": [5842, 5847, 5850],
+            "low": [5838, 5841, 5844],
+            "close": [5841, 5846, 5848],
+        },
+        index=pd.date_range("2026-01-13 14:00", periods=3, freq="5min"),
+    )
 
     fake_trades = [
         {"side": "LONG", "entry": 5845, "result": "+2R"},
@@ -156,9 +164,7 @@ def test_snapshot():
     }
 
     snapshot_dir = debug.save_snapshot(
-        market_data=fake_market_data,
-        trades=fake_trades,
-        account_info=fake_account
+        market_data=fake_market_data, trades=fake_trades, account_info=fake_account
     )
 
     # Verify snapshot created
@@ -169,7 +175,7 @@ def test_snapshot():
     assert (snapshot_dir / "account_info.json").exists(), "Account info not saved"
 
     print(f"✅ Snapshot created: {snapshot_dir}")
-    print(f"✅ Contains: snapshot.json, market_data.csv, trades.json, account_info.json")
+    print("✅ Contains: snapshot.json, market_data.csv, trades.json, account_info.json")
 
     return True
 
@@ -204,6 +210,7 @@ def test_daily_summary():
 
     # Show content
     import json
+
     with open(summary_file) as f:
         content = json.load(f)
 
@@ -289,7 +296,7 @@ def main():
         # Ask user if they want to keep test logs
         print("\n" + "=" * 60)
         response = input("Delete test logs? (y/n): ")
-        if response.lower() == 'y':
+        if response.lower() == "y":
             cleanup_test_logs()
         else:
             print("✅ Test logs preserved in logs_test/ for inspection")
@@ -299,6 +306,7 @@ def main():
     except Exception as e:
         print(f"\n❌ TEST SUITE FAILED: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

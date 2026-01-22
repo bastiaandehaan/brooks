@@ -1,7 +1,5 @@
 # tests/test_guardrails.py
-from zoneinfo import ZoneInfo
 import pandas as pd
-import pytest
 
 from execution.guardrails import Guardrails, apply_guardrails
 from strategies.h2l2 import PlannedTrade, Side
@@ -12,11 +10,23 @@ def _utc(s: str) -> pd.Timestamp:
 
 
 def test_session_filter_new_york():
-    g = Guardrails(session_tz="America/New_York", day_tz="America/New_York", session_start="09:30", session_end="15:00")
+    g = Guardrails(
+        session_tz="America/New_York",
+        day_tz="America/New_York",
+        session_start="09:30",
+        session_end="15:00",
+    )
 
     plans = [
-        PlannedTrade(Side.LONG, _utc("2026-01-09T12:00:00Z"), _utc("2026-01-09T12:05:00Z"), 100.0, 99.0, 101.0,
-                     "reason1")
+        PlannedTrade(
+            Side.LONG,
+            _utc("2026-01-09T12:00:00Z"),
+            _utc("2026-01-09T12:05:00Z"),
+            100.0,
+            99.0,
+            101.0,
+            "reason1",
+        )
     ]
 
     acc, rej = apply_guardrails(plans, g)
@@ -26,8 +36,15 @@ def test_session_filter_new_york():
     assert rej[0][1] == "outside_session"  # Changed from "outside session"
 
     plans2 = [
-        PlannedTrade(Side.LONG, _utc("2026-01-09T15:00:00Z"), _utc("2026-01-09T15:05:00Z"), 100.0, 99.0, 101.0,
-                     "reason2")
+        PlannedTrade(
+            Side.LONG,
+            _utc("2026-01-09T15:00:00Z"),
+            _utc("2026-01-09T15:05:00Z"),
+            100.0,
+            99.0,
+            101.0,
+            "reason2",
+        )
     ]
     acc, rej = apply_guardrails(plans2, g)
     assert len(acc) == 1
@@ -38,9 +55,33 @@ def test_max_trades_per_day_new_york():
     g = Guardrails(max_trades_per_day=2)
 
     plans = [
-        PlannedTrade(Side.LONG, _utc("2026-01-09T15:00:00Z"), _utc("2026-01-09T15:05:00Z"), 100.0, 99.0, 101.0, "a"),
-        PlannedTrade(Side.LONG, _utc("2026-01-09T16:00:00Z"), _utc("2026-01-09T16:05:00Z"), 100.0, 99.0, 101.0, "b"),
-        PlannedTrade(Side.LONG, _utc("2026-01-09T17:00:00Z"), _utc("2026-01-09T17:05:00Z"), 100.0, 99.0, 101.0, "c"),
+        PlannedTrade(
+            Side.LONG,
+            _utc("2026-01-09T15:00:00Z"),
+            _utc("2026-01-09T15:05:00Z"),
+            100.0,
+            99.0,
+            101.0,
+            "a",
+        ),
+        PlannedTrade(
+            Side.LONG,
+            _utc("2026-01-09T16:00:00Z"),
+            _utc("2026-01-09T16:05:00Z"),
+            100.0,
+            99.0,
+            101.0,
+            "b",
+        ),
+        PlannedTrade(
+            Side.LONG,
+            _utc("2026-01-09T17:00:00Z"),
+            _utc("2026-01-09T17:05:00Z"),
+            100.0,
+            99.0,
+            101.0,
+            "c",
+        ),
     ]
 
     acc, rej = apply_guardrails(plans, g)

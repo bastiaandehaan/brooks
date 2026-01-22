@@ -3,13 +3,15 @@
 Test strategy over 60, 180, and 340 days
 Validates consistency and robustness
 """
-import sys
+
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backtest.runner import run_backtest
 import pandas as pd
+
+from backtest.runner import run_backtest
 
 
 def main():
@@ -48,10 +50,11 @@ def main():
 
     df = pd.DataFrame(results)
 
-    print(df[[
-        "days", "trades", "net_r", "winrate", "sharpe",
-        "profit_factor", "max_dd"
-    ]].to_string(index=False))
+    print(
+        df[["days", "trades", "net_r", "winrate", "sharpe", "profit_factor", "max_dd"]].to_string(
+            index=False
+        )
+    )
 
     print("\n" + "=" * 80)
     print("  🎯 ROBUSTNESS CHECK")

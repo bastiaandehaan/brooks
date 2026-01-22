@@ -4,14 +4,14 @@ from __future__ import annotations
 import builtins
 import json
 import traceback
-from datetime import datetime, date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Union
+from typing import Any
 
 import pandas as pd
 
 # Zorg dat de variabele bestaat op module-niveau + in builtins (tests kunnen dit verwachten)
-recent_errors: List[Dict[str, Any]] = []
+recent_errors: list[dict[str, Any]] = []
 if not hasattr(builtins, "recent_errors"):
     builtins.recent_errors = recent_errors
 
@@ -33,7 +33,7 @@ class DebugLogger:
         for d in (self.errors_dir, self.trades_dir, self.snapshots_dir, self.debug_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-    def log_error(self, error_context: Dict[str, Any]) -> Path:
+    def log_error(self, error_context: dict[str, Any]) -> Path:
         """Log error context to both JSON and TXT files."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         json_file = self.errors_dir / f"error_{timestamp}.json"
@@ -49,7 +49,7 @@ class DebugLogger:
 
         return json_file
 
-    def log_trade(self, trade_data: Dict[str, Any]) -> Path:
+    def log_trade(self, trade_data: dict[str, Any]) -> Path:
         """Log trade execution data to a daily JSONL file."""
         date_str = datetime.now().strftime("%Y%m%d")
         jsonl_file = self.trades_dir / f"trades_{date_str}.jsonl"
@@ -57,7 +57,7 @@ class DebugLogger:
             f.write(json.dumps(trade_data, ensure_ascii=False) + "\n")
         return jsonl_file
 
-    def capture_error_context(self, exception: Exception = None, **kwargs: Any) -> Dict[str, Any]:
+    def capture_error_context(self, exception: Exception = None, **kwargs: Any) -> dict[str, Any]:
         """Captures full system state during an error."""
         exc = exception if exception is not None else kwargs.get("error")
         return {
@@ -68,7 +68,7 @@ class DebugLogger:
             "system_state": {"market_data": "market_data" in kwargs},
         }
 
-    def save_snapshot(self, snapshot_data: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Path:
+    def save_snapshot(self, snapshot_data: dict[str, Any] | None = None, **kwargs: Any) -> Path:
         """Saves a system snapshot with all required files for tests."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         folder = self.snapshots_dir / timestamp
@@ -91,7 +91,7 @@ class DebugLogger:
 
         return folder
 
-    def save_daily_summary(self, summary_data: Dict[str, Any]) -> Path:
+    def save_daily_summary(self, summary_data: dict[str, Any]) -> Path:
         """Saves a daily performance summary."""
         date_str = datetime.now().strftime("%Y%m%d")
         summary_file = self.snapshots_dir / f"daily_summary_{date_str}.json"
@@ -99,14 +99,14 @@ class DebugLogger:
             json.dump(summary_data, f, indent=4, ensure_ascii=False)
         return summary_file
 
-    def get_recent_errors(self, count: int = 5) -> List[Dict[str, Any]]:
+    def get_recent_errors(self, count: int = 5) -> list[dict[str, Any]]:
         """Helper to retrieve error logs."""
         files = sorted(self.errors_dir.glob("error_*.json"), reverse=True)
-        errors: List[Dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
 
         for f in files[:count]:
             try:
-                with open(f, "r", encoding="utf-8") as e:
+                with open(f, encoding="utf-8") as e:
                     errors.append(json.load(e))
             except (OSError, json.JSONDecodeError):
                 continue
@@ -117,7 +117,7 @@ class DebugLogger:
         builtins.recent_errors = errors
         return errors
 
-    def get_daily_trades(self, day: Optional[Union[str, date]] = None) -> List[Dict[str, Any]]:
+    def get_daily_trades(self, day: str | date | None = None) -> list[dict[str, Any]]:
         """
         Required by tests: load trades from trades_YYYYMMDD.jsonl.
         day:
@@ -136,9 +136,9 @@ class DebugLogger:
         if not jsonl_file.exists():
             return []
 
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         try:
-            with open(jsonl_file, "r", encoding="utf-8") as f:
+            with open(jsonl_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:

@@ -1,8 +1,8 @@
 # tests/test_backtest_daily_selection.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 import random
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -33,11 +33,41 @@ def test_daily_selection_is_deterministic_top2_with_shuffle():
     day_exec = _utc("2026-01-05 15:00:00")
 
     trades = [
-        DummyTrade(signal_ts=_utc("2026-01-05 14:55:00"), execute_ts=day_exec, side="BUY",  entry=4800.00, stop=4790.00),  # FIRST
-        DummyTrade(signal_ts=_utc("2026-01-05 14:56:00"), execute_ts=day_exec, side="BUY",  entry=4800.00, stop=4798.75),  # SECOND
-        DummyTrade(signal_ts=_utc("2026-01-05 14:57:00"), execute_ts=day_exec, side="SELL", entry=4800.00, stop=4801.50),
-        DummyTrade(signal_ts=_utc("2026-01-05 14:58:00"), execute_ts=day_exec, side="SELL", entry=4800.00, stop=4805.00),
-        DummyTrade(signal_ts=_utc("2026-01-05 14:59:00"), execute_ts=day_exec, side="BUY",  entry=4800.00, stop=4797.00),
+        DummyTrade(
+            signal_ts=_utc("2026-01-05 14:55:00"),
+            execute_ts=day_exec,
+            side="BUY",
+            entry=4800.00,
+            stop=4790.00,
+        ),  # FIRST
+        DummyTrade(
+            signal_ts=_utc("2026-01-05 14:56:00"),
+            execute_ts=day_exec,
+            side="BUY",
+            entry=4800.00,
+            stop=4798.75,
+        ),  # SECOND
+        DummyTrade(
+            signal_ts=_utc("2026-01-05 14:57:00"),
+            execute_ts=day_exec,
+            side="SELL",
+            entry=4800.00,
+            stop=4801.50,
+        ),
+        DummyTrade(
+            signal_ts=_utc("2026-01-05 14:58:00"),
+            execute_ts=day_exec,
+            side="SELL",
+            entry=4800.00,
+            stop=4805.00,
+        ),
+        DummyTrade(
+            signal_ts=_utc("2026-01-05 14:59:00"),
+            execute_ts=day_exec,
+            side="BUY",
+            entry=4800.00,
+            stop=4797.00,
+        ),
     ]
 
     expected_top2, _ = select_top_per_ny_day(

@@ -3,12 +3,12 @@
 Brooks H2/L2 - SIMPEL zoals Brooks het bedoelde
 Geen bar counting state machines. Alleen: pullback + rejection bar.
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,7 @@ class H2L2Params:
     """
     Brooks H2/L2 Parameters - KISS versie
     """
+
     # Swing detection: kijk N bars terug voor swing low/high
     pullback_bars: int = 3
 
@@ -39,7 +40,7 @@ class H2L2Params:
     stop_buffer: float = 1.0  # extra ruimte onder/boven swing
 
     # Legacy alias (voor oude tests)
-    min_risk_points: Optional[float] = None
+    min_risk_points: float | None = None
 
     # Cooldown (optioneel, meestal 0)
     cooldown_bars: int = 0
@@ -77,30 +78,30 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _is_rejection_bar(o: float, h: float, l: float, c: float, side: Side, frac: float) -> bool:
+def _is_rejection_bar(o: float, h: float, low: float, c: float, side: Side, frac: float) -> bool:
     """
     Brooks rejection bar:
     - LONG: close near high + bullish body (c > o)
     - SHORT: close near low + bearish body (c < o)
     """
-    bar_range = max(h - l, 1e-12)
+    bar_range = max(h - low, 1e-12)
 
     if side == Side.LONG:
         close_near_high = (h - c) <= frac * bar_range
         bullish = c > o
         return close_near_high and bullish
     else:  # SHORT
-        close_near_low = (c - l) <= frac * bar_range
+        close_near_low = (c - low) <= frac * bar_range
         bearish = c < o
         return close_near_low and bearish
 
 
 def plan_h2l2_trades(
-        m5: pd.DataFrame,
-        trend: Side,
-        spec: SymbolSpec,
-        p: H2L2Params,
-) -> List[PlannedTrade]:
+    m5: pd.DataFrame,
+    trend: Side,
+    spec: SymbolSpec,
+    p: H2L2Params,
+) -> list[PlannedTrade]:
     """
     Brooks H2/L2 - PURE implementatie:
 
@@ -118,20 +119,20 @@ def plan_h2l2_trades(
     if len(m5) < p.pullback_bars + 2:
         return []
 
-    trades: List[PlannedTrade] = []
+    trades: list[PlannedTrade] = []
     cooldown = 0
 
-    for i in range(p.pullback_bars, len(m5) - 1):
+    for idx in range(p.pullback_bars, len(m5) - 1):
         if cooldown > 0:
             cooldown -= 1
             continue
 
-        bar = m5.iloc[i]
-        next_bar = m5.iloc[i + 1]
+        bar = m5.iloc[idx]
+        next_bar = m5.iloc[idx + 1]
 
         o = float(bar["open"])
         h = float(bar["high"])
-        l = float(bar["low"])
+        low = float(bar["low"])
         c = float(bar["close"])
 
         entry = float(next_bar["open"])
@@ -139,16 +140,16 @@ def plan_h2l2_trades(
             continue
 
         # Detecteer swing in lookback window (inclusief current bar)
-        window = m5.iloc[i - p.pullback_bars + 1: i + 1]
+        window = m5.iloc[idx - p.pullback_bars + 1 : idx + 1]
         swing_low = float(window["low"].min())
         swing_high = float(window["high"].max())
 
         # Skip doji's (geen range = geen rejection)
-        if h - l < 0.01:
+        if h - low < 0.01:
             continue
 
         # Check rejection bar
-        if not _is_rejection_bar(o, h, l, c, trend, p.signal_close_frac):
+        if not _is_rejection_bar(o, h, low, c, trend, p.signal_close_frac):
             continue
 
         # Risk calculation
@@ -161,19 +162,26 @@ def plan_h2l2_trades(
 
             tp = entry + 2.0 * risk
 
-            trades.append(PlannedTrade(
-                signal_ts=bar.name,
-                execute_ts=next_bar.name,
-                side=Side.LONG,
-                entry=entry,
-                stop=stop,
-                tp=tp,
-                reason=f"H2 LONG: rejection after {p.pullback_bars}bar swing",
-            ))
+            trades.append(
+                PlannedTrade(
+                    signal_ts=bar.name,
+                    execute_ts=next_bar.name,
+                    side=Side.LONG,
+                    entry=entry,
+                    stop=stop,
+                    tp=tp,
+                    reason=f"H2 LONG: rejection after {p.pullback_bars}bar swing",
+                )
+            )
 
             logger.debug(
                 "H2 LONG signal=%s exec=%s entry=%.2f stop=%.2f tp=%.2f risk=%.2f",
-                bar.name, next_bar.name, entry, stop, tp, risk
+                bar.name,
+                next_bar.name,
+                entry,
+                stop,
+                tp,
+                risk,
             )
 
             cooldown = p.cooldown_bars
@@ -187,19 +195,26 @@ def plan_h2l2_trades(
 
             tp = entry - 2.0 * risk
 
-            trades.append(PlannedTrade(
-                signal_ts=bar.name,
-                execute_ts=next_bar.name,
-                side=Side.SHORT,
-                entry=entry,
-                stop=stop,
-                tp=tp,
-                reason=f"L2 SHORT: rejection after {p.pullback_bars}bar swing",
-            ))
+            trades.append(
+                PlannedTrade(
+                    signal_ts=bar.name,
+                    execute_ts=next_bar.name,
+                    side=Side.SHORT,
+                    entry=entry,
+                    stop=stop,
+                    tp=tp,
+                    reason=f"L2 SHORT: rejection after {p.pullback_bars}bar swing",
+                )
+            )
 
             logger.debug(
                 "L2 SHORT signal=%s exec=%s entry=%.2f stop=%.2f tp=%.2f risk=%.2f",
-                bar.name, next_bar.name, entry, stop, tp, risk
+                bar.name,
+                next_bar.name,
+                entry,
+                stop,
+                tp,
+                risk,
             )
 
             cooldown = p.cooldown_bars
@@ -208,13 +223,13 @@ def plan_h2l2_trades(
 
 
 def plan_next_open_trade(
-        m5: pd.DataFrame,
-        trend: Side,
-        spec: SymbolSpec,
-        p: H2L2Params,
-        timeframe_minutes: int = 5,
-        now_utc: Optional[pd.Timestamp] = None,
-) -> Optional[PlannedTrade]:
+    m5: pd.DataFrame,
+    trend: Side,
+    spec: SymbolSpec,
+    p: H2L2Params,
+    timeframe_minutes: int = 5,
+    now_utc: pd.Timestamp | None = None,
+) -> PlannedTrade | None:
     """
     NEXT_OPEN wrapper: vind laatste trade die execute op laatste/next bar.
 

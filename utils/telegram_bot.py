@@ -3,11 +3,13 @@
 Telegram notifications for Brooks trading system
 Now with .env support for security
 """
+
 import os
-import requests
-from datetime import datetime
-from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+import requests
 
 # Try to load .env
 try:
@@ -21,6 +23,7 @@ except ImportError:
 @dataclass
 class TradingSignal:
     """Structured trading signal data for Telegram notifications"""
+
     symbol: str
     side: str  # "LONG" or "SHORT"
     entry: float
@@ -30,7 +33,7 @@ class TradingSignal:
     risk_usd: float
     risk_pct: float
     reason: str
-    regime: Optional[str] = None
+    regime: str | None = None
 
 
 class TelegramBot:
@@ -45,7 +48,7 @@ class TelegramBot:
     5. Create .env file with credentials
     """
 
-    def __init__(self, bot_token: Optional[str] = None, chat_id: Optional[str] = None):
+    def __init__(self, bot_token: str | None = None, chat_id: str | None = None):
         """
         Args:
             bot_token: Bot token from @BotFather (or from .env)
@@ -56,19 +59,17 @@ class TelegramBot:
 
         if not self.bot_token:
             raise ValueError(
-                "❌ TELEGRAM_BOT_TOKEN not found!\n"
-                "   Set it in .env file or pass to __init__"
+                "❌ TELEGRAM_BOT_TOKEN not found!\n" "   Set it in .env file or pass to __init__"
             )
 
         if not self.chat_id:
             raise ValueError(
-                "❌ TELEGRAM_CHAT_ID not found!\n"
-                "   Set it in .env file or pass to __init__"
+                "❌ TELEGRAM_CHAT_ID not found!\n" "   Set it in .env file or pass to __init__"
             )
 
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
 
-    def send_message(self, text: str, parse_mode: str = "HTML") -> Optional[Dict]:
+    def send_message(self, text: str, parse_mode: str = "HTML") -> dict | None:
         """
         Send text message
 
@@ -157,12 +158,7 @@ SL: {sl:.2f} | TP: {tp:.2f}
         return result is not None
 
     def send_exit(
-            self,
-            side: str,
-            entry: float,
-            exit_price: float,
-            result_r: float,
-            pnl_usd: float
+        self, side: str, entry: float, exit_price: float, result_r: float, pnl_usd: float
     ) -> bool:
         """
         Report trade exit
@@ -194,7 +190,7 @@ Entry: {entry:.2f} → Exit: {exit_price:.2f}
         result = self.send_message(msg)
         return result is not None
 
-    def send_daily_summary(self, stats: Dict[str, Any]) -> bool:
+    def send_daily_summary(self, stats: dict[str, Any]) -> bool:
         """
         Send end-of-day summary
 
@@ -271,7 +267,7 @@ Your Telegram bot is configured correctly!
 ✅ Ready for live monitoring
 
 <i>Test sent at {}</i>
-        """.strip().format(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        """.strip().format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
         result = self.send_message(msg)
 

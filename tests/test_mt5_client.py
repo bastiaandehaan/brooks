@@ -1,6 +1,8 @@
-import pytest
 from types import SimpleNamespace
-from utils.mt5_client import Mt5Client, Mt5ConnectionParams, symbol_info_to_dict
+
+import pytest
+
+from utils.mt5_client import Mt5Client, Mt5ConnectionParams
 
 
 @pytest.fixture
@@ -37,11 +39,16 @@ def mt5_mock():
             trade_tick_size=0.01,
             trade_tick_value=0.01,
             _asdict=lambda: {
-                "name": symbol, "digits": 2, "point": 0.01,
-                "trade_contract_size": 1.0, "volume_min": 0.01,
-                "volume_max": 100.0, "volume_step": 0.01,
-                "trade_tick_size": 0.01, "trade_tick_value": 0.01
-            }
+                "name": symbol,
+                "digits": 2,
+                "point": 0.01,
+                "trade_contract_size": 1.0,
+                "volume_min": 0.01,
+                "volume_max": 100.0,
+                "volume_step": 0.01,
+                "trade_tick_size": 0.01,
+                "trade_tick_value": 0.01,
+            },
         )
 
     ns.symbol_info = mock_symbol_info

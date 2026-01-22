@@ -2,15 +2,14 @@
 """
 Order execution and management
 """
-import MetaTrader5 as mt5
+
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class OrderResult:
     success: bool
-    ticket: Optional[int]
+    ticket: int | None
     price: float
     message: str
 
@@ -20,13 +19,13 @@ class OrderManager:
         self.mt5 = mt5_module
 
     def place_market_order(
-            self,
-            symbol: str,
-            side: str,  # "LONG" or "SHORT"
-            lots: float,
-            sl: float,
-            tp: float,
-            comment: str = "Brooks"
+        self,
+        symbol: str,
+        side: str,  # "LONG" or "SHORT"
+        lots: float,
+        sl: float,
+        tp: float,
+        comment: str = "Brooks",
     ) -> OrderResult:
         """Place market order with SL/TP"""
 
@@ -67,14 +66,14 @@ class OrderManager:
                 success=False,
                 ticket=None,
                 price=0.0,
-                message=f"Order failed: {result.retcode} - {result.comment}"
+                message=f"Order failed: {result.retcode} - {result.comment}",
             )
 
         return OrderResult(
             success=True,
             ticket=result.order,
             price=result.price,
-            message="Order filled successfully"
+            message="Order filled successfully",
         )
 
     def get_open_positions(self, symbol: str = None):

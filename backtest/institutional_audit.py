@@ -10,22 +10,22 @@ Implements:
 5. M1 both-hit resolution
 6. Complete audit trail
 """
+
 from __future__ import annotations
 
 import hashlib
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import List, Tuple, Dict, Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy import stats
-
 
 # ============================================================================
 # 1. LOOK-AHEAD BIAS VERIFICATION
 # ============================================================================
+
 
 class BiasDetector:
     """
@@ -39,21 +39,15 @@ class BiasDetector:
 
     @staticmethod
     def verify_no_lookahead(
-            m15_data: pd.DataFrame,
-            m5_data: pd.DataFrame,
-            trades: List[Any]
-    ) -> Dict[str, Any]:
+        m15_data: pd.DataFrame, m5_data: pd.DataFrame, trades: list[Any]
+    ) -> dict[str, Any]:
         """
         Comprehensive look-ahead bias check
 
         Returns:
             Dict with verification results
         """
-        results = {
-            'passed': True,
-            'issues': [],
-            'warnings': []
-        }
+        results = {"passed": True, "issues": [], "warnings": []}
 
         # Test 1: Check merge direction
         # merge_asof with direction="backward" is safe
@@ -62,8 +56,8 @@ class BiasDetector:
         # Test 2: Verify signal_ts < execute_ts for all trades
         for i, trade in enumerate(trades):
             if trade.signal_ts >= trade.execute_ts:
-                results['passed'] = False
-                results['issues'].append(
+                results["passed"] = False
+                results["issues"].append(
                     f"Trade {i}: signal_ts ({trade.signal_ts}) >= execute_ts ({trade.execute_ts})"
                 )
 
@@ -74,7 +68,7 @@ class BiasDetector:
             trades_on_last_bar = [t for t in trades if t.execute_ts == last_m5_bar]
 
             if trades_on_last_bar:
-                results['warnings'].append(
+                results["warnings"].append(
                     f"{len(trades_on_last_bar)} trades execute on last bar - "
                     "ensure this bar is fully closed"
                 )
@@ -86,24 +80,24 @@ class BiasDetector:
         return results
 
     @staticmethod
-    def print_bias_report(results: Dict[str, Any]):
+    def print_bias_report(results: dict[str, Any]):
         """Print formatted bias verification report"""
         print("\n" + "=" * 80)
         print("  🔍 LOOK-AHEAD BIAS VERIFICATION")
         print("=" * 80)
 
-        if results['passed']:
+        if results["passed"]:
             print("\n✅ NO BIAS DETECTED")
             print("   All causality checks passed")
         else:
             print("\n❌ BIAS DETECTED!")
             print(f"   {len(results['issues'])} critical issues found:")
-            for issue in results['issues']:
+            for issue in results["issues"]:
                 print(f"   • {issue}")
 
-        if results['warnings']:
+        if results["warnings"]:
             print(f"\n⚠️  {len(results['warnings'])} warnings:")
-            for warning in results['warnings']:
+            for warning in results["warnings"]:
                 print(f"   • {warning}")
 
         print("\n" + "=" * 80 + "\n")
@@ -113,9 +107,11 @@ class BiasDetector:
 # 2. MONTE CARLO SIMULATION
 # ============================================================================
 
+
 @dataclass
 class MonteCarloResults:
     """Results from Monte Carlo simulation"""
+
     simulations: int
     original_net_r: float
     original_max_dd: float
@@ -138,9 +134,7 @@ class MonteCarloResults:
 
 
 def monte_carlo_simulation(
-        trade_results: np.ndarray,
-        n_simulations: int = 1000,
-        confidence_level: float = 0.95
+    trade_results: np.ndarray, n_simulations: int = 1000, confidence_level: float = 0.95
 ) -> MonteCarloResults:
     """
     Monte Carlo stress test: shuffle trade order 1000x
@@ -200,7 +194,7 @@ def monte_carlo_simulation(
         max_dd_mean=np.mean(max_dds),
         max_dd_std=np.std(max_dds),
         prob_profit=prob_profit,
-        prob_dd_worse_than_original=prob_dd_worse
+        prob_dd_worse_than_original=prob_dd_worse,
     )
 
 
@@ -212,14 +206,14 @@ def print_monte_carlo_report(results: MonteCarloResults):
 
     print(f"\nSimulations: {results.simulations:,}")
 
-    print(f"\n📊 NET R:")
+    print("\n📊 NET R:")
     print(f"  Original    : {results.original_net_r:+.2f}R")
     print(f"  Mean (MC)   : {results.net_r_mean:+.2f}R")
     print(f"  Std (MC)    : {results.net_r_std:.2f}R")
     print(f"  95% CI      : [{results.net_r_95_lower:+.2f}R, {results.net_r_95_upper:+.2f}R]")
     print(f"  Prob Profit : {results.prob_profit * 100:.1f}%")
 
-    print(f"\n📉 MAX DRAWDOWN:")
+    print("\n📉 MAX DRAWDOWN:")
     print(f"  Original    : {results.original_max_dd:.2f}R")
     print(f"  Mean (MC)   : {results.max_dd_mean:.2f}R")
     print(f"  Std (MC)    : {results.max_dd_std:.2f}R")
@@ -228,7 +222,7 @@ def print_monte_carlo_report(results: MonteCarloResults):
     print(f"  Prob Worse  : {results.prob_dd_worse_than_original * 100:.1f}%")
 
     # Interpretation
-    print(f"\n💡 INTERPRETATION:")
+    print("\n💡 INTERPRETATION:")
 
     if results.prob_profit > 0.95:
         print(f"   ✅ Robust: {results.prob_profit * 100:.1f}% chance of profit across orderings")
@@ -238,9 +232,9 @@ def print_monte_carlo_report(results: MonteCarloResults):
         print(f"   ❌ Fragile: Only {results.prob_profit * 100:.1f}% chance of profit")
 
     if abs(results.net_r_95_lower - results.net_r_95_upper) / results.net_r_mean < 0.5:
-        print(f"   ✅ Tight CI: Results are order-independent")
+        print("   ✅ Tight CI: Results are order-independent")
     else:
-        print(f"   ⚠️  Wide CI: Results sensitive to trade sequence")
+        print("   ⚠️  Wide CI: Results sensitive to trade sequence")
 
     print("\n" + "=" * 80 + "\n")
 
@@ -249,9 +243,11 @@ def print_monte_carlo_report(results: MonteCarloResults):
 # 3. FTMO COMPLIANCE MONITOR
 # ============================================================================
 
+
 @dataclass
 class FTMOCompliance:
     """FTMO rule compliance results"""
+
     max_daily_loss_r: float
     max_daily_loss_pct: float
     max_daily_loss_date: str
@@ -262,15 +258,15 @@ class FTMOCompliance:
     breached_10pct_total: bool
 
     days_checked: int
-    violations: List[Dict[str, Any]]
+    violations: list[dict[str, Any]]
 
 
 def check_ftmo_compliance(
-        trade_results: List[float],
-        exec_timestamps: List[pd.Timestamp],
-        initial_balance: float = 10000.0,
-        daily_limit_pct: float = 5.0,
-        total_limit_pct: float = 10.0
+    trade_results: list[float],
+    exec_timestamps: list[pd.Timestamp],
+    initial_balance: float = 10000.0,
+    daily_limit_pct: float = 5.0,
+    total_limit_pct: float = 10.0,
 ) -> FTMOCompliance:
     """
     Check if strategy would have breached FTMO limits
@@ -290,14 +286,11 @@ def check_ftmo_compliance(
         FTMOCompliance with detailed results
     """
     # Convert to DataFrame
-    df = pd.DataFrame({
-        'result_r': trade_results,
-        'timestamp': exec_timestamps
-    })
+    df = pd.DataFrame({"result_r": trade_results, "timestamp": exec_timestamps})
 
     # Convert to NY timezone and group by day
-    df['date'] = df['timestamp'].dt.tz_convert('America/New_York').dt.date
-    daily = df.groupby('date')['result_r'].sum().sort_index()
+    df["date"] = df["timestamp"].dt.tz_convert("America/New_York").dt.date
+    daily = df.groupby("date")["result_r"].sum().sort_index()
 
     # Find worst day
     worst_day_r = daily.min()
@@ -319,13 +312,15 @@ def check_ftmo_compliance(
     for date, daily_r in daily.items():
         daily_pct = (daily_r / (initial_balance / 100)) * 100
         if daily_pct < -daily_limit_pct:
-            violations.append({
-                'date': str(date),
-                'type': 'DAILY_LIMIT',
-                'loss_r': daily_r,
-                'loss_pct': daily_pct,
-                'limit_pct': daily_limit_pct
-            })
+            violations.append(
+                {
+                    "date": str(date),
+                    "type": "DAILY_LIMIT",
+                    "loss_r": daily_r,
+                    "loss_pct": daily_pct,
+                    "limit_pct": daily_limit_pct,
+                }
+            )
 
     return FTMOCompliance(
         max_daily_loss_r=worst_day_r,
@@ -336,7 +331,7 @@ def check_ftmo_compliance(
         max_total_dd_pct=total_dd_pct,
         breached_10pct_total=breached_total,
         days_checked=len(daily),
-        violations=violations
+        violations=violations,
     )
 
 
@@ -346,29 +341,31 @@ def print_ftmo_report(compliance: FTMOCompliance):
     print("  🛡️  FTMO COMPLIANCE CHECK")
     print("=" * 80)
 
-    print(f"\n📅 DAILY LOSS LIMIT (5% Rule):")
+    print("\n📅 DAILY LOSS LIMIT (5% Rule):")
     print(f"  Worst Day   : {compliance.max_daily_loss_date}")
-    print(f"  Loss        : {compliance.max_daily_loss_r:.2f}R ({compliance.max_daily_loss_pct:.2f}%)")
-    print(f"  Limit       : -5.00%")
+    print(
+        f"  Loss        : {compliance.max_daily_loss_r:.2f}R ({compliance.max_daily_loss_pct:.2f}%)"
+    )
+    print("  Limit       : -5.00%")
 
     if compliance.breached_5pct_daily:
-        print(f"  Status      : ❌ BREACHED!")
-        print(f"  Impact      : Account would be CLOSED by FTMO")
+        print("  Status      : ❌ BREACHED!")
+        print("  Impact      : Account would be CLOSED by FTMO")
     else:
         margin = abs(compliance.max_daily_loss_pct + 5.0)
-        print(f"  Status      : ✅ OK")
+        print("  Status      : ✅ OK")
         print(f"  Safety      : {margin:.2f}% margin")
 
-    print(f"\n📊 TOTAL DRAWDOWN LIMIT (10% Rule):")
+    print("\n📊 TOTAL DRAWDOWN LIMIT (10% Rule):")
     print(f"  Max DD      : {compliance.max_total_dd_r:.2f}R ({compliance.max_total_dd_pct:.2f}%)")
-    print(f"  Limit       : -10.00%")
+    print("  Limit       : -10.00%")
 
     if compliance.breached_10pct_total:
-        print(f"  Status      : ❌ BREACHED!")
-        print(f"  Impact      : Account would be CLOSED by FTMO")
+        print("  Status      : ❌ BREACHED!")
+        print("  Impact      : Account would be CLOSED by FTMO")
     else:
         margin = abs(compliance.max_total_dd_pct + 10.0)
-        print(f"  Status      : ✅ OK")
+        print("  Status      : ✅ OK")
         print(f"  Safety      : {margin:.2f}% margin")
 
     if compliance.violations:
@@ -384,32 +381,26 @@ def print_ftmo_report(compliance: FTMOCompliance):
 # 4. AUDIT TRAIL GENERATOR
 # ============================================================================
 
+
 def get_git_commit() -> str:
     """Get current Git commit hash"""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=2
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=2
         )
         return result.stdout.strip()[:8] if result.returncode == 0 else "NO_GIT"
-    except Exception:
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
         return "NO_GIT"
 
 
-def generate_config_hash(config: Dict[str, Any]) -> str:
+def generate_config_hash(config: dict[str, Any]) -> str:
     """Generate MD5 hash of configuration"""
     config_str = str(sorted(config.items()))
     return hashlib.md5(config_str.encode()).hexdigest()[:8]
 
 
 def export_institutional_csv(
-        trades: List[Any],
-        results_r: List[float],
-        filename: str,
-        git_commit: str,
-        config_hash: str
+    trades: list[Any], results_r: list[float], filename: str, git_commit: str, config_hash: str
 ):
     """
     Export trades to CSV with institutional-grade detail
@@ -424,26 +415,28 @@ def export_institutional_csv(
     """
     rows = []
 
-    for trade, result in zip(trades, results_r):
+    for trade, result in zip(trades, results_r, strict=True):
         # Estimate exit timestamp (would be real in live trading)
         exit_ts = trade.execute_ts + pd.Timedelta(hours=2)
 
-        rows.append({
-            'signal_ts': trade.signal_ts.isoformat(),
-            'execute_ts': trade.execute_ts.isoformat(),
-            'exit_ts': exit_ts.isoformat(),
-            'side': trade.side.value,
-            'entry': trade.entry,
-            'stop': trade.stop,
-            'tp': trade.tp,
-            'result_r': result,
-            'result_usd': result * 100,  # Assuming 1R = $100
-            'spread_paid_pts': 0.5,  # Would be actual in live
-            'slippage_pts': 0.3,  # Would be actual in live
-            'reason': trade.reason,
-            'git_commit': git_commit,
-            'config_hash': config_hash
-        })
+        rows.append(
+            {
+                "signal_ts": trade.signal_ts.isoformat(),
+                "execute_ts": trade.execute_ts.isoformat(),
+                "exit_ts": exit_ts.isoformat(),
+                "side": trade.side.value,
+                "entry": trade.entry,
+                "stop": trade.stop,
+                "tp": trade.tp,
+                "result_r": result,
+                "result_usd": result * 100,  # Assuming 1R = $100
+                "spread_paid_pts": 0.5,  # Would be actual in live
+                "slippage_pts": 0.3,  # Would be actual in live
+                "reason": trade.reason,
+                "git_commit": git_commit,
+                "config_hash": config_hash,
+            }
+        )
 
     df = pd.DataFrame(rows)
     df.to_csv(filename, index=False)
@@ -458,14 +451,15 @@ def export_institutional_csv(
 # 5. MASTER AUDIT FUNCTION
 # ============================================================================
 
+
 def run_institutional_audit(
-        m15_data: pd.DataFrame,
-        m5_data: pd.DataFrame,
-        trades: List[Any],
-        results_r: List[float],
-        exec_timestamps: List[pd.Timestamp],
-        config: Dict[str, Any]
-) -> Dict[str, Any]:
+    m15_data: pd.DataFrame,
+    m5_data: pd.DataFrame,
+    trades: list[Any],
+    results_r: list[float],
+    exec_timestamps: list[pd.Timestamp],
+    config: dict[str, Any],
+) -> dict[str, Any]:
     """
     Run complete institutional audit
 
@@ -504,14 +498,14 @@ def run_institutional_audit(
     print("\n[5/5] Generating summary...")
 
     summary = {
-        'bias_check': bias_results,
-        'monte_carlo': asdict(mc_results),
-        'ftmo_compliance': asdict(ftmo_results),
-        'audit_trail': {
-            'git_commit': git_commit,
-            'config_hash': config_hash,
-            'csv_file': csv_filename
-        }
+        "bias_check": bias_results,
+        "monte_carlo": asdict(mc_results),
+        "ftmo_compliance": asdict(ftmo_results),
+        "audit_trail": {
+            "git_commit": git_commit,
+            "config_hash": config_hash,
+            "csv_file": csv_filename,
+        },
     }
 
     # Final verdict
@@ -523,7 +517,7 @@ def run_institutional_audit(
     failed_checks = []
     warnings = []
 
-    if bias_results['passed']:
+    if bias_results["passed"]:
         passed_checks.append("✅ Bias Verification")
     else:
         failed_checks.append("❌ Bias Verification")

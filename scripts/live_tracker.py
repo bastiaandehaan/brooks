@@ -2,10 +2,12 @@
 """
 Track live trading performance
 """
-import pandas as pd
+
 import json
 from datetime import datetime
 from pathlib import Path
+
+import pandas as pd
 
 
 class LiveTracker:
@@ -16,21 +18,18 @@ class LiveTracker:
     def load_trades(self):
         """Load existing trades from JSON"""
         if self.log_file.exists():
-            with open(self.log_file, 'r') as f:
+            with open(self.log_file) as f:
                 return json.load(f)
         return []
 
     def save_trades(self):
         """Save trades to JSON"""
-        with open(self.log_file, 'w') as f:
+        with open(self.log_file, "w") as f:
             json.dump(self.trades, f, indent=2, default=str)
 
     def log_trade(self, trade_data: dict):
         """Log a completed trade"""
-        self.trades.append({
-            **trade_data,
-            "logged_at": datetime.now().isoformat()
-        })
+        self.trades.append({**trade_data, "logged_at": datetime.now().isoformat()})
         self.save_trades()
 
     def get_stats(self):
@@ -39,7 +38,7 @@ class LiveTracker:
             return None
 
         df = pd.DataFrame(self.trades)
-        results = df['result_r'].values
+        results = df["result_r"].values
 
         equity = results.cumsum()
         running_max = pd.Series(equity).cummax()
@@ -71,6 +70,6 @@ class LiveTracker:
         print(f"Expectancy  : {stats['expectancy']:+.4f}R")
         print(f"Max DD      : {stats['max_dd']:.2f}R")
         print(f"Current DD  : {stats['current_dd']:.2f}R")
-        if stats['last_10_avg']:
+        if stats["last_10_avg"]:
             print(f"Last 10 avg : {stats['last_10_avg']:+.4f}R")
         print("=" * 50 + "\n")

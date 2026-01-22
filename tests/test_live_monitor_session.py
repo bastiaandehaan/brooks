@@ -1,5 +1,7 @@
 import pandas as pd
+
 from scripts.live_monitor import SessionConfig, session_state
+
 
 def test_session_state_cutoff():
     cfg = SessionConfig(session_start="09:30", session_end="16:00", trade_cutoff="15:30")

@@ -8,12 +8,11 @@ Multiple ways to stop trading immediately:
 3. FTMO limit breach
 4. Manual keyboard interrupt
 """
+
 from __future__ import annotations
 
-import os
 import logging
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ class EmergencyStop:
     4. Ctrl+C keyboard interrupt
     """
 
-    def __init__(self, project_root: Optional[Path] = None):
+    def __init__(self, project_root: Path | None = None):
         self.project_root = project_root or Path.cwd()
         self.stop_file = self.project_root / "STOP.txt"
         self.manual_stop = False
@@ -60,11 +59,11 @@ class EmergencyStop:
 
         logger.error(f"⛔ EMERGENCY STOP TRIGGERED: {reason}")
         print("\n" + "⛔" * 30)
-        print(f"  EMERGENCY STOP TRIGGERED")
+        print("  EMERGENCY STOP TRIGGERED")
         print(f"  Reason: {reason}")
         print("⛔" * 30 + "\n")
 
-    def should_stop(self) -> tuple[bool, Optional[str]]:
+    def should_stop(self) -> tuple[bool, str | None]:
         """
         Check if trading should stop
 
@@ -102,7 +101,7 @@ class EmergencyStop:
             "is_stopped": should_stop,
             "reason": reason,
             "stop_file_exists": self.stop_file.exists(),
-            "manual_stop": self.manual_stop
+            "manual_stop": self.manual_stop,
         }
 
 
@@ -127,6 +126,7 @@ class TradingState:
             }
 
         import json
+
         try:
             with open(self.state_file) as f:
                 return json.load(f)
@@ -142,8 +142,9 @@ class TradingState:
     def _save_state(self) -> None:
         """Save state to file"""
         import json
+
         try:
-            with open(self.state_file, 'w') as f:
+            with open(self.state_file, "w") as f:
                 json.dump(self.state, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
@@ -162,7 +163,7 @@ class TradingState:
         self._save_state()
         logger.info("Trading ENABLED")
 
-    def is_trading_enabled(self) -> tuple[bool, Optional[str]]:
+    def is_trading_enabled(self) -> tuple[bool, str | None]:
         """Check if trading is enabled"""
         return self.state["trading_enabled"], self.state.get("last_stop_reason")
 
@@ -176,7 +177,7 @@ class TradingState:
         """Get today's stats"""
         return {
             "trades": self.state.get("total_trades_today", 0),
-            "pnl": self.state.get("daily_pnl", 0.0)
+            "pnl": self.state.get("daily_pnl", 0.0),
         }
 
 

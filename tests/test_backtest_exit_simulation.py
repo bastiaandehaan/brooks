@@ -1,8 +1,9 @@
-import pandas as pd
 from dataclasses import dataclass
 
-from strategies.h2l2 import Side
+import pandas as pd
+
 from backtest.runner import _simulate_trade_outcome
+from strategies.h2l2 import Side
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ def test_exit_includes_execute_bar_sl_hit():
     m5 = pd.DataFrame(
         {
             "high": [101.0, 101.0],
-            "low": [99.0, 100.0],   # SL geraakt op execute bar
+            "low": [99.0, 100.0],  # SL geraakt op execute bar
             "open": [100.0, 100.0],
             "close": [100.0, 100.0],
         },

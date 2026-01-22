@@ -1,6 +1,7 @@
 # test_config.py
-from strategies.config import StrategyConfig
 import os
+
+from strategies.config import StrategyConfig
 
 
 def test_load_production():

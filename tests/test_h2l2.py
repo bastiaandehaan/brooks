@@ -1,6 +1,6 @@
 import pandas as pd
 
-from strategies.h2l2 import Side, H2L2Params, plan_h2l2_trades
+from strategies.h2l2 import H2L2Params, Side, plan_h2l2_trades
 from utils.symbol_spec import SymbolSpec
 
 
@@ -11,14 +11,46 @@ def _df(rows):
 
 
 def test_plans_h2_long_next_open():
-    m5 = _df([
-        {"ts": "2026-01-01T15:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100.5},
-        {"ts": "2026-01-01T15:35:00Z", "open": 100.5, "high": 100.6, "low": 98.8, "close": 99.2},
-        {"ts": "2026-01-01T15:40:00Z", "open": 99.2, "high": 100.7, "low": 99.0, "close": 100.6},
-        {"ts": "2026-01-01T15:45:00Z", "open": 100.6, "high": 100.65, "low": 98.7, "close": 99.0},
-        {"ts": "2026-01-01T15:50:00Z", "open": 99.0, "high": 100.8, "low": 98.9, "close": 100.75},
-        {"ts": "2026-01-01T15:55:00Z", "open": 100.75, "high": 101.0, "low": 100.2, "close": 100.8},
-    ])
+    m5 = _df(
+        [
+            {"ts": "2026-01-01T15:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100.5},
+            {
+                "ts": "2026-01-01T15:35:00Z",
+                "open": 100.5,
+                "high": 100.6,
+                "low": 98.8,
+                "close": 99.2,
+            },
+            {
+                "ts": "2026-01-01T15:40:00Z",
+                "open": 99.2,
+                "high": 100.7,
+                "low": 99.0,
+                "close": 100.6,
+            },
+            {
+                "ts": "2026-01-01T15:45:00Z",
+                "open": 100.6,
+                "high": 100.65,
+                "low": 98.7,
+                "close": 99.0,
+            },
+            {
+                "ts": "2026-01-01T15:50:00Z",
+                "open": 99.0,
+                "high": 100.8,
+                "low": 98.9,
+                "close": 100.75,
+            },
+            {
+                "ts": "2026-01-01T15:55:00Z",
+                "open": 100.75,
+                "high": 101.0,
+                "low": 100.2,
+                "close": 100.8,
+            },
+        ]
+    )
 
     spec = SymbolSpec(
         name="US500.cash",

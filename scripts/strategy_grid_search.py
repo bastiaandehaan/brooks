@@ -12,20 +12,22 @@ Changes from original:
 2. COMPOSITE scoring (Daily Sharpe × Recovery Factor)
 3. EARLY stopping (skip configs that can't beat current best)
 """
-import sys
+
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pandas as pd
-from itertools import product
-from datetime import datetime
 import json
-
-from backtest.runner import run_backtest
 
 # Suppress verbose logging
 import logging
+from datetime import datetime
+from itertools import product
+
+import pandas as pd
+
+from backtest.runner import run_backtest
 
 logging.getLogger("execution.guardrails").setLevel(logging.WARNING)
 logging.getLogger("Backtest").setLevel(logging.WARNING)
@@ -39,9 +41,9 @@ def composite_score(metrics):
     - Recovery Factor (stability)
     - Trade count (enough data)
     """
-    sharpe = metrics.get('daily_sharpe', metrics.get('sharpe', 0))
-    recovery = metrics.get('recovery_factor', 0)
-    trades = metrics.get('trades', 0)
+    sharpe = metrics.get("daily_sharpe", metrics.get("sharpe", 0))
+    recovery = metrics.get("recovery_factor", 0)
+    trades = metrics.get("trades", 0)
 
     # Penalty for low trade count
     if trades < 100:
@@ -72,7 +74,11 @@ def grid_search_phase_0_regime(days=180):
 
     for idx, (regime_filter, chop_threshold) in enumerate(configs, 1):
         filter_str = "ON" if regime_filter else "OFF"
-        print(f"[{idx}/{len(configs)}] regime={filter_str}, chop={chop_threshold:.1f}... ", end="", flush=True)
+        print(
+            f"[{idx}/{len(configs)}] regime={filter_str}, chop={chop_threshold:.1f}... ",
+            end="",
+            flush=True,
+        )
 
         metrics = run_backtest(
             symbol="US500.cash",
@@ -91,18 +97,16 @@ def grid_search_phase_0_regime(days=180):
         )
 
         if "error" not in metrics:
-            metrics['score'] = composite_score(metrics)
-            results.append({
-                "regime_filter": regime_filter,
-                "chop_threshold": chop_threshold,
-                **metrics
-            })
+            metrics["score"] = composite_score(metrics)
+            results.append(
+                {"regime_filter": regime_filter, "chop_threshold": chop_threshold, **metrics}
+            )
             print(f"✓ Sharpe={metrics.get('daily_sharpe', 0):.3f}, Score={metrics['score']:.3f}")
         else:
             print("✗ Error")
 
     df = pd.DataFrame(results)
-    df_sorted = df.sort_values('score', ascending=False)
+    df_sorted = df.sort_values("score", ascending=False)
 
     print("\n" + "=" * 80)
     print("PHASE 0 RESULTS:")
@@ -113,7 +117,8 @@ def grid_search_phase_0_regime(days=180):
     best = df_sorted.iloc[0]
     print(f"\n🎯 WINNER: regime={best['regime_filter']}, chop={best['chop_threshold']:.1f}")
     print(
-        f"   Score={best['score']:.3f} | Sharpe={best.get('daily_sharpe', 0):.3f} | Recovery={best.get('recovery_factor', 0):.2f}\n")
+        f"   Score={best['score']:.3f} | Sharpe={best.get('daily_sharpe', 0):.3f} | Recovery={best.get('recovery_factor', 0):.2f}\n"
+    )
 
     return best
 
@@ -141,7 +146,11 @@ def grid_search_phase_1_context(days=180, best_regime=None):
     best_score = 0
 
     for idx, (min_slope, ema_period) in enumerate(configs, 1):
-        print(f"[{idx}/{len(configs)}] slope={min_slope:.2f}, ema={ema_period}... ", end="", flush=True)
+        print(
+            f"[{idx}/{len(configs)}] slope={min_slope:.2f}, ema={ema_period}... ",
+            end="",
+            flush=True,
+        )
 
         metrics = run_backtest(
             symbol="US500.cash",
@@ -160,19 +169,15 @@ def grid_search_phase_1_context(days=180, best_regime=None):
         )
 
         if "error" not in metrics:
-            metrics['score'] = composite_score(metrics)
-            results.append({
-                "min_slope": min_slope,
-                "ema_period": ema_period,
-                **metrics
-            })
+            metrics["score"] = composite_score(metrics)
+            results.append({"min_slope": min_slope, "ema_period": ema_period, **metrics})
             print(f"✓ Sharpe={metrics.get('daily_sharpe', 0):.3f}, Score={metrics['score']:.3f}")
-            best_score = max(best_score, metrics['score'])
+            best_score = max(best_score, metrics["score"])
         else:
             print("✗ Error")
 
     df = pd.DataFrame(results)
-    df_sorted = df.sort_values('score', ascending=False)
+    df_sorted = df.sort_values("score", ascending=False)
 
     print("\n" + "=" * 80)
     print("PHASE 1 RESULTS:")
@@ -210,7 +215,11 @@ def grid_search_phase_2_h2l2(days=180, best_regime=None, best_context=None):
     results = []
 
     for idx, (pullback, close_frac) in enumerate(configs, 1):
-        print(f"[{idx}/{len(configs)}] pullback={pullback}, frac={close_frac:.2f}... ", end="", flush=True)
+        print(
+            f"[{idx}/{len(configs)}] pullback={pullback}, frac={close_frac:.2f}... ",
+            end="",
+            flush=True,
+        )
 
         metrics = run_backtest(
             symbol="US500.cash",
@@ -229,18 +238,14 @@ def grid_search_phase_2_h2l2(days=180, best_regime=None, best_context=None):
         )
 
         if "error" not in metrics:
-            metrics['score'] = composite_score(metrics)
-            results.append({
-                "pullback_bars": pullback,
-                "signal_close_frac": close_frac,
-                **metrics
-            })
+            metrics["score"] = composite_score(metrics)
+            results.append({"pullback_bars": pullback, "signal_close_frac": close_frac, **metrics})
             print(f"✓ Sharpe={metrics.get('daily_sharpe', 0):.3f}, Score={metrics['score']:.3f}")
         else:
             print("✗ Error")
 
     df = pd.DataFrame(results)
-    df_sorted = df.sort_values('score', ascending=False)
+    df_sorted = df.sort_values("score", ascending=False)
 
     print("\n" + "=" * 80)
     print("PHASE 2 RESULTS:")
@@ -278,7 +283,9 @@ def grid_search_phase_3_risk(days=180, best_regime=None, best_context=None, best
 
     for stop_buf, min_risk in product(stop_buffers, min_risks):
         counter += 1
-        print(f"[{counter}/{total}] stop={stop_buf:.1f}, risk={min_risk:.1f}... ", end="", flush=True)
+        print(
+            f"[{counter}/{total}] stop={stop_buf:.1f}, risk={min_risk:.1f}... ", end="", flush=True
+        )
 
         metrics = run_backtest(
             symbol="US500.cash",
@@ -297,35 +304,43 @@ def grid_search_phase_3_risk(days=180, best_regime=None, best_context=None, best
         )
 
         if "error" not in metrics:
-            metrics['score'] = composite_score(metrics)
-            results.append({
-                "stop_buffer": stop_buf,
-                "min_risk": min_risk,
-                **metrics
-            })
-            print(f"✓ Sharpe={metrics.get('daily_sharpe', 0):.3f}, DD={metrics.get('max_dd', 0):.1f}R")
+            metrics["score"] = composite_score(metrics)
+            results.append({"stop_buffer": stop_buf, "min_risk": min_risk, **metrics})
+            print(
+                f"✓ Sharpe={metrics.get('daily_sharpe', 0):.3f}, DD={metrics.get('max_dd', 0):.1f}R"
+            )
         else:
             print("✗ Error")
 
     df = pd.DataFrame(results)
-    df_sorted = df.sort_values('score', ascending=False)
+    df_sorted = df.sort_values("score", ascending=False)
 
     print("\n" + "=" * 80)
     print("PHASE 3 RESULTS:")
     print("=" * 80)
-    cols = ["stop_buffer", "min_risk", "trades", "daily_sharpe", "max_dd", "recovery_factor", "score"]
+    cols = [
+        "stop_buffer",
+        "min_risk",
+        "trades",
+        "daily_sharpe",
+        "max_dd",
+        "recovery_factor",
+        "score",
+    ]
     print(df_sorted[cols].head(10).to_string(index=False))
 
     best = df_sorted.iloc[0]
     print(f"\n🎯 WINNER: stop={best['stop_buffer']:.1f}, risk={best['min_risk']:.1f}")
     print(
-        f"   Score={best['score']:.3f} | DD={best.get('max_dd', 0):.2f}R | Recovery={best.get('recovery_factor', 0):.2f}\n")
+        f"   Score={best['score']:.3f} | DD={best.get('max_dd', 0):.2f}R | Recovery={best.get('recovery_factor', 0):.2f}\n"
+    )
 
     return best
 
 
-def grid_search_phase_4_execution(days=180, best_regime=None, best_context=None,
-                                  best_h2l2=None, best_risk=None):
+def grid_search_phase_4_execution(
+    days=180, best_regime=None, best_context=None, best_h2l2=None, best_risk=None
+):
     """Phase 4: Execution Timing"""
     print("\n" + "=" * 80)
     print("  PHASE 4: EXECUTION TIMING")
@@ -371,18 +386,16 @@ def grid_search_phase_4_execution(days=180, best_regime=None, best_context=None,
         )
 
         if "error" not in metrics:
-            metrics['score'] = composite_score(metrics)
-            results.append({
-                "cooldown": cooldown,
-                "max_trades_day": max_day,
-                **metrics
-            })
-            print(f"✓ Trades={metrics.get('trades', 0)}, Sharpe={metrics.get('daily_sharpe', 0):.3f}")
+            metrics["score"] = composite_score(metrics)
+            results.append({"cooldown": cooldown, "max_trades_day": max_day, **metrics})
+            print(
+                f"✓ Trades={metrics.get('trades', 0)}, Sharpe={metrics.get('daily_sharpe', 0):.3f}"
+            )
         else:
             print("✗ Error")
 
     df = pd.DataFrame(results)
-    df_sorted = df.sort_values('score', ascending=False)
+    df_sorted = df.sort_values("score", ascending=False)
 
     print("\n" + "=" * 80)
     print("PHASE 4 RESULTS:")
@@ -419,7 +432,7 @@ def validate_final_config(config, days=340):
         costs_per_trade_r=0.04,
     )
 
-    sharpe = metrics.get('daily_sharpe', metrics.get('sharpe', 0))
+    sharpe = metrics.get("daily_sharpe", metrics.get("sharpe", 0))
 
     print("\n📊 VALIDATION RESULTS:")
     print(f"  Trades         : {metrics.get('trades', 0)}")
@@ -460,18 +473,13 @@ def main():
     # Phase 2: H2/L2 Setup
     print("Starting Phase 2...")
     best_h2l2 = grid_search_phase_2_h2l2(
-        days=180,
-        best_regime=best_regime,
-        best_context=best_context
+        days=180, best_regime=best_regime, best_context=best_context
     )
 
     # Phase 3: Risk Management
     print("Starting Phase 3...")
     best_risk = grid_search_phase_3_risk(
-        days=180,
-        best_regime=best_regime,
-        best_context=best_context,
-        best_h2l2=best_h2l2
+        days=180, best_regime=best_regime, best_context=best_context, best_h2l2=best_h2l2
     )
 
     # Phase 4: Execution
@@ -481,7 +489,7 @@ def main():
         best_regime=best_regime,
         best_context=best_context,
         best_h2l2=best_h2l2,
-        best_risk=best_risk
+        best_risk=best_risk,
     )
 
     # Build optimal config
@@ -510,20 +518,20 @@ def main():
             "costs_per_trade_r": 0.04,
         },
         "performance_180d": {
-            "daily_sharpe": float(best_execution.get('daily_sharpe', 0)),
+            "daily_sharpe": float(best_execution.get("daily_sharpe", 0)),
             "net_r": float(best_execution["net_r"]),
             "winrate": float(best_execution["winrate"]),
             "trades": int(best_execution["trades"]),
             "max_dd": float(best_execution.get("max_dd", 0)),
             "score": float(best_execution.get("score", 0)),
-        }
+        },
     }
 
     # Validate on 340 days
     validation_metrics = validate_final_config(optimal_config, days=340)
 
     optimal_config["performance_340d"] = {
-        "daily_sharpe": float(validation_metrics.get('daily_sharpe', 0)),
+        "daily_sharpe": float(validation_metrics.get("daily_sharpe", 0)),
         "net_r": float(validation_metrics.get("net_r", 0)),
         "winrate": float(validation_metrics.get("winrate", 0)),
         "trades": int(validation_metrics.get("trades", 0)),

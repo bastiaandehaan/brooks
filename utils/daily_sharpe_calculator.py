@@ -3,18 +3,19 @@
 Calculate daily Sharpe ratio from trade logs.
 Converts trade-level P&L to daily returns and applies proper annualization.
 """
+
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
 from pathlib import Path
-from typing import Optional
+
+import numpy as np
+import pandas as pd
 
 
 def calculate_daily_sharpe(
-        trades_df: pd.DataFrame,
-        initial_capital: float = 10000.0,
-        trading_days_per_year: int = 252,
+    trades_df: pd.DataFrame,
+    initial_capital: float = 10000.0,
+    trading_days_per_year: int = 252,
 ) -> dict[str, float]:
     """
     Calculate daily Sharpe ratio from trade history.
@@ -29,35 +30,31 @@ def calculate_daily_sharpe(
     """
     if trades_df.empty:
         return {
-            'daily_sharpe': 0.0,
-            'annualized_return': 0.0,
-            'annualized_vol': 0.0,
-            'total_trading_days': 0
+            "daily_sharpe": 0.0,
+            "annualized_return": 0.0,
+            "annualized_vol": 0.0,
+            "total_trading_days": 0,
         }
 
     # Ensure exit_time is datetime
     trades_df = trades_df.copy()
-    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
-    trades_df['date'] = trades_df['exit_time'].dt.date
+    trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"])
+    trades_df["date"] = trades_df["exit_time"].dt.date
 
     # Convert R to dollar P&L (assume 1R = 1% of capital per trade)
     risk_per_trade = initial_capital * 0.01  # 1% risk
-    trades_df['pnl'] = trades_df['net_r'] * risk_per_trade
+    trades_df["pnl"] = trades_df["net_r"] * risk_per_trade
 
     # Aggregate to daily P&L
-    daily_pnl = trades_df.groupby('date')['pnl'].sum().reset_index()
-    daily_pnl = daily_pnl.sort_values('date')
+    daily_pnl = trades_df.groupby("date")["pnl"].sum().reset_index()
+    daily_pnl = daily_pnl.sort_values("date")
 
     # Create complete date range (include non-trading days as 0)
-    date_range = pd.date_range(
-        start=daily_pnl['date'].min(),
-        end=daily_pnl['date'].max(),
-        freq='D'
-    )
+    date_range = pd.date_range(start=daily_pnl["date"].min(), end=daily_pnl["date"].max(), freq="D")
 
     daily_series = pd.Series(0.0, index=date_range)
     for _, row in daily_pnl.iterrows():
-        daily_series[pd.Timestamp(row['date'])] = row['pnl']
+        daily_series[pd.Timestamp(row["date"])] = row["pnl"]
 
     # Calculate daily returns
     capital_series = initial_capital + daily_series.cumsum()
@@ -77,19 +74,18 @@ def calculate_daily_sharpe(
     annualized_vol = std_daily_return * np.sqrt(trading_days_per_year)
 
     return {
-        'daily_sharpe': round(daily_sharpe, 3),
-        'annualized_return': round(annualized_return * 100, 2),  # as %
-        'annualized_vol': round(annualized_vol * 100, 2),  # as %
-        'total_trading_days': len(date_range),
-        'days_with_trades': len(daily_pnl),
-        'mean_daily_return': mean_daily_return,
-        'std_daily_return': std_daily_return
+        "daily_sharpe": round(daily_sharpe, 3),
+        "annualized_return": round(annualized_return * 100, 2),  # as %
+        "annualized_vol": round(annualized_vol * 100, 2),  # as %
+        "total_trading_days": len(date_range),
+        "days_with_trades": len(daily_pnl),
+        "mean_daily_return": mean_daily_return,
+        "std_daily_return": std_daily_return,
     }
 
 
 def add_daily_sharpe_to_backtest(
-        trades_log_path: str | Path,
-        initial_capital: float = 10000.0
+    trades_log_path: str | Path, initial_capital: float = 10000.0
 ) -> None:
     """
     Read trade log and print daily Sharpe calculation.
@@ -99,7 +95,7 @@ def add_daily_sharpe_to_backtest(
     """
     trades_df = pd.read_csv(trades_log_path)
 
-    if 'net_r' not in trades_df.columns or 'exit_time' not in trades_df.columns:
+    if "net_r" not in trades_df.columns or "exit_time" not in trades_df.columns:
         print("❌ Trade log must have 'net_r' and 'exit_time' columns")
         return
 
@@ -116,11 +112,11 @@ def add_daily_sharpe_to_backtest(
     print("=" * 50 + "\n")
 
     # Interpretation guide
-    if metrics['daily_sharpe'] > 1.5:
+    if metrics["daily_sharpe"] > 1.5:
         print("✅ Excellent Sharpe (>1.5) - Institutional grade")
-    elif metrics['daily_sharpe'] > 1.0:
+    elif metrics["daily_sharpe"] > 1.0:
         print("✅ Good Sharpe (1.0-1.5) - Strong risk-adjusted returns")
-    elif metrics['daily_sharpe'] > 0.5:
+    elif metrics["daily_sharpe"] > 0.5:
         print("⚠️  Moderate Sharpe (0.5-1.0) - Acceptable but room for improvement")
     else:
         print("❌ Low Sharpe (<0.5) - Needs optimization")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from utils.symbol_spec import SymbolSpec
 
@@ -15,9 +15,9 @@ class Mt5Error(RuntimeError):
 
 @dataclass(frozen=True)
 class Mt5ConnectionParams:
-    login: Optional[int] = None
-    password: Optional[str] = None
-    server: Optional[str] = None
+    login: int | None = None
+    password: str | None = None
+    server: str | None = None
     timeout_ms: int = 10_000
 
 
@@ -29,7 +29,7 @@ class Mt5Client:
 
     def initialize(self) -> bool:
         logger.info("Initializing MT5 connection...")
-        kwargs: Dict[str, Any] = {"timeout": self._params.timeout_ms}
+        kwargs: dict[str, Any] = {"timeout": self._params.timeout_ms}
         if self._params.login is not None:
             kwargs["login"] = self._params.login
             kwargs["password"] = self._params.password
@@ -55,7 +55,7 @@ class Mt5Client:
             self._initialized = False
             logger.info("MT5 connection shutdown.")
 
-    def symbols_search(self, group: str = "") -> List[str]:
+    def symbols_search(self, group: str = "") -> list[str]:
         self._require_init()
         symbols = self._mt5.symbols_get(group)
         if symbols is None:
@@ -69,7 +69,7 @@ class Mt5Client:
             return False
         return True
 
-    def get_symbol_specification(self, symbol: str) -> Optional[SymbolSpec]:
+    def get_symbol_specification(self, symbol: str) -> SymbolSpec | None:
         """
         Haalt specificaties op en retourneert een SymbolSpec object.
         """
@@ -87,7 +87,7 @@ class Mt5Client:
             logger.error(f"Failed to create SymbolSpec for {symbol}: {e}")
             return None
 
-    def symbol_info(self, symbol: str) -> Dict[str, Any]:
+    def symbol_info(self, symbol: str) -> dict[str, Any]:
         """Wrapper rond mt5.symbol_info die altijd een dict teruggeeft."""
         self._require_init()
 
@@ -112,7 +112,7 @@ class Mt5Client:
             return -1, "unknown"
 
 
-def symbol_info_to_dict(info_obj: Any) -> Dict[str, Any]:
+def symbol_info_to_dict(info_obj: Any) -> dict[str, Any]:
     """Zet MT5 object om naar dict."""
     if hasattr(info_obj, "_asdict"):
         return dict(info_obj._asdict())
@@ -122,9 +122,16 @@ def symbol_info_to_dict(info_obj: Any) -> Dict[str, Any]:
 
     # Fallback velden (dit dekt de meeste mocks en echte objecten)
     known_fields = [
-        "name", "digits", "point",
-        "trade_contract_size", "spread", "trade_stops_level",
-        "volume_min", "volume_max", "volume_step",
-        "trade_tick_size", "trade_tick_value"
+        "name",
+        "digits",
+        "point",
+        "trade_contract_size",
+        "spread",
+        "trade_stops_level",
+        "volume_min",
+        "volume_max",
+        "volume_step",
+        "trade_tick_size",
+        "trade_tick_value",
     ]
     return {k: getattr(info_obj, k) for k in known_fields if hasattr(info_obj, k)}

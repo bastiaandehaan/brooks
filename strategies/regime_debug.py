@@ -2,19 +2,18 @@
 """
 Debug tool to find optimal regime threshold
 """
+
+import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
-import MetaTrader5 as mt5
 
-from utils.mt5_client import Mt5Client
-from utils.mt5_data import fetch_rates, RatesRequest
 from strategies.regime import RegimeParams
+from utils.mt5_client import Mt5Client
+from utils.mt5_data import RatesRequest, fetch_rates
 
 
 def calculate_threshold_for_target_choppy_pct(
-        m15_data: pd.DataFrame,
-        target_choppy_pct: float,
-        params: RegimeParams
+    m15_data: pd.DataFrame, target_choppy_pct: float, params: RegimeParams
 ) -> float:
     """
     Find threshold that gives desired % of choppy bars
@@ -36,8 +35,8 @@ def calculate_threshold_for_target_choppy_pct(
         high - low,
         np.maximum(
             np.abs(high - np.concatenate([[close[0]], close[:-1]])),
-            np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-        )
+            np.abs(low - np.concatenate([[close[0]], close[:-1]])),
+        ),
     )
     atr = pd.Series(tr, index=m15_data.index).rolling(params.atr_period).mean()
 
@@ -77,11 +76,11 @@ def print_threshold_analysis(stats: dict, chop_ratio: pd.Series, threshold: floa
     print("\n" + "=" * 80)
     print("  📊 REGIME THRESHOLD ANALYSIS")
     print("=" * 80)
-    print(f"\nChop Ratio Statistics:")
+    print("\nChop Ratio Statistics:")
     print(f"  Mean      : {stats['mean']:.2f}")
     print(f"  Median    : {stats['median']:.2f}")
     print(f"  Std Dev   : {stats['std']:.2f}")
-    print(f"\nPercentiles:")
+    print("\nPercentiles:")
     print(f"  10th : {stats['p10']:.2f}")
     print(f"  25th : {stats['p25']:.2f}")
     print(f"  75th : {stats['p75']:.2f}")
@@ -105,7 +104,9 @@ def print_threshold_analysis(stats: dict, chop_ratio: pd.Series, threshold: floa
 
         marker = " ⭐" if abs(test_threshold - threshold) < 0.5 else ""
 
-        print(f"{test_threshold:<12.1f} {choppy_pct:<12.1f} {tradable_pct:<12.1f} {choppy_bars:<12}{marker}")
+        print(
+            f"{test_threshold:<12.1f} {choppy_pct:<12.1f} {tradable_pct:<12.1f} {choppy_bars:<12}{marker}"
+        )
 
     print("=" * 80 + "\n")
 
@@ -146,12 +147,16 @@ def main():
     # Recommendations
     print("💡 RECOMMENDATIONS:")
     print(f"   1. Use threshold = {threshold:.1f} for ~{target_choppy}% choppy")
-    print(f"   2. Current threshold (2.0) gives ~{100 * (chop_ratio <= 2.0).sum() / len(chop_ratio):.1f}% choppy")
+    print(
+        f"   2. Current threshold (2.0) gives ~{100 * (chop_ratio <= 2.0).sum() / len(chop_ratio):.1f}% choppy"
+    )
     print(f"   3. For conservative filter (5% choppy), use threshold = {stats['p95']:.1f}")
     print(f"   4. For aggressive filter (10% choppy), use threshold = {stats['p90']:.1f}")
 
     print("\n🚀 RUN BACKTEST WITH OPTIMAL THRESHOLD:")
-    print(f"   python -m backtest.runner --days 340 --regime-filter --chop-threshold {threshold:.1f}")
+    print(
+        f"   python -m backtest.runner --days 340 --regime-filter --chop-threshold {threshold:.1f}"
+    )
     print()
 
     client.shutdown()

@@ -5,10 +5,10 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
 logger = logging.getLogger("BacktestVisualiser")
 
@@ -91,12 +91,12 @@ def generate_performance_report(
         hspace=0.35,
     )
 
-    ax1 = fig.add_subplot(gs[0, 0])       # Equity
+    ax1 = fig.add_subplot(gs[0, 0])  # Equity
     ax_price = fig.add_subplot(gs[1, 0])  # Price
-    ax2 = fig.add_subplot(gs[2, 0])       # Drawdown
-    ax3 = fig.add_subplot(gs[3, 0])       # Rolling winrate
-    ax5 = fig.add_subplot(gs[4, 0])       # Daily pnl
-    ax_info = fig.add_subplot(gs[5, 0])   # Metrics box
+    ax2 = fig.add_subplot(gs[2, 0])  # Drawdown
+    ax3 = fig.add_subplot(gs[3, 0])  # Rolling winrate
+    ax5 = fig.add_subplot(gs[4, 0])  # Daily pnl
+    ax_info = fig.add_subplot(gs[5, 0])  # Metrics box
 
     title_run = f"{symbol} ({days} days)"
     if period_start is not None and period_end is not None:
@@ -121,14 +121,20 @@ def generate_performance_report(
     ax_price.set_title("Instrument price over test period", fontsize=12, fontweight="bold")
     if price_series is not None:
         ps = pd.Series(price_series)
-        if isinstance(ps.index, pd.DatetimeIndex) and period_start is not None and period_end is not None:
+        if (
+            isinstance(ps.index, pd.DatetimeIndex)
+            and period_start is not None
+            and period_end is not None
+        ):
             try:
-                ps = ps.loc[pd.to_datetime(period_start):pd.to_datetime(period_end)]
+                ps = ps.loc[pd.to_datetime(period_start) : pd.to_datetime(period_end)]
             except Exception:
                 pass
 
         if isinstance(ps.index, pd.DatetimeIndex):
-            ax_price.plot(ps.index, ps.values, color="#111111", linewidth=1.2, label=f"{symbol} M15 close")
+            ax_price.plot(
+                ps.index, ps.values, color="#111111", linewidth=1.2, label=f"{symbol} M15 close"
+            )
             _apply_time_axis(ax_price)
             ax_price.set_xlabel("Time")
         else:
@@ -159,11 +165,19 @@ def generate_performance_report(
     # 4) Rolling winrate
     rolling_winrate = (res > 0).rolling(window=30).mean() * 100.0
     if isinstance(res.index, pd.DatetimeIndex):
-        ax3.plot(res.index, rolling_winrate.values, color="#1f77b4", linewidth=2, label="Winrate % (Rolling 30)")
+        ax3.plot(
+            res.index,
+            rolling_winrate.values,
+            color="#1f77b4",
+            linewidth=2,
+            label="Winrate % (Rolling 30)",
+        )
         _apply_time_axis(ax3)
         ax3.set_xlabel("Time")
     else:
-        ax3.plot(rolling_winrate.values, color="#1f77b4", linewidth=2, label="Winrate % (Rolling 30)")
+        ax3.plot(
+            rolling_winrate.values, color="#1f77b4", linewidth=2, label="Winrate % (Rolling 30)"
+        )
         ax3.set_xlabel("Trades")
     ax3.axhline(33.3, color="orange", linestyle="--", label="Breakeven (1:2 RR)")
     ax3.set_ylabel("Winrate %")

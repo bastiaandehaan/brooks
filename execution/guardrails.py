@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -46,15 +45,15 @@ def _in_session(exec_ts_utc: pd.Timestamp, g: Guardrails) -> bool:
 
 
 def apply_guardrails(
-        plans: List[PlannedTrade],
-        g: Guardrails,
-) -> tuple[List[PlannedTrade], List[tuple[PlannedTrade, str]]]:
+    plans: list[PlannedTrade],
+    g: Guardrails,
+) -> tuple[list[PlannedTrade], list[tuple[PlannedTrade, str]]]:
     """
     Apply guardrails with minimal logging (no spam per rejected trade).
     """
     day_tz = ZoneInfo(g.day_tz)
-    accepted: List[PlannedTrade] = []
-    rejected: List[tuple[PlannedTrade, str]] = []
+    accepted: list[PlannedTrade] = []
+    rejected: list[tuple[PlannedTrade, str]] = []
 
     trades_per_day: dict[pd.Timestamp, int] = {}
     used_exec_ts: set[pd.Timestamp] = set()

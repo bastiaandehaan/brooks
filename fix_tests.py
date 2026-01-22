@@ -6,7 +6,7 @@ def fix_content(filepath):
     if not os.path.exists(filepath):
         return False
 
-    with open(filepath, 'r', encoding='utf-8') as f:
+    with open(filepath, encoding="utf-8") as f:
         content = f.read()
 
     original = content
@@ -22,16 +22,20 @@ def fix_content(filepath):
     content = content.replace("debug.log_daily_summary(", "debug.save_daily_summary(")
 
     # 3. Comment out missing methods (get_recent_logs bestaat niet in de logger)
-    content = content.replace("recent_errors = debug.get_recent_logs(n=5)",
-                              "# recent_errors = debug.get_recent_logs(n=5) # Method missing")
+    content = content.replace(
+        "recent_errors = debug.get_recent_logs(n=5)",
+        "# recent_errors = debug.get_recent_logs(n=5) # Method missing",
+    )
 
     # 4. Fix Smoke Test (Zoeken naar bundle_repo.py ipv ps1 script)
     content = content.replace('root / "scripts" / "make_llm_bundle.ps1"', 'root / "bundle_repo.py"')
-    content = content.replace('assert script.exists(), "make_llm_bundle.ps1 missing"',
-                              'assert script.exists(), "bundle_repo.py missing"')
+    content = content.replace(
+        'assert script.exists(), "make_llm_bundle.ps1 missing"',
+        'assert script.exists(), "bundle_repo.py missing"',
+    )
 
     if content != original:
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
         return True
     return False

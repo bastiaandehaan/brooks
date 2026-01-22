@@ -1,6 +1,7 @@
 # tests/test_selection_diagnostics.py
-import pandas as pd
 from dataclasses import dataclass
+
+import pandas as pd
 
 from execution.selection import select_top_per_ny_day
 
@@ -25,8 +26,9 @@ def test_selection_deterministic_and_filters_bad_rows():
         T(day, day, "SHORT", 100.0, 98.0),  # risk 2
     ]
 
-    sel, stats = select_top_per_ny_day(trades, max_trades_day=1, tick_size=0.25, tz_ny="America/New_York",
-                                       log_daily=False)
+    sel, stats = select_top_per_ny_day(
+        trades, max_trades_day=1, tick_size=0.25, tz_ny="America/New_York", log_daily=False
+    )
     assert len(sel) == 1
     assert sel[0].stop == 99.0  # min risk picked deterministically (chronological if same time)
 

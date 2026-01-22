@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class SymbolSpec:
         return min(v, self.volume_max)
 
     @staticmethod
-    def from_symbol_info(info: Dict[str, Any]) -> "SymbolSpec":
+    def from_symbol_info(info: dict[str, Any]) -> SymbolSpec:
         """
         Factory method: Vertaalt ruwe MT5 data (dict) naar een schoon SymbolSpec object.
         Dit voorkomt fouten met veldnamen in de rest van de applicatie.

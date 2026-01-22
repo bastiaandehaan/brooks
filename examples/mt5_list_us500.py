@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
 import MetaTrader5 as mt5
+
 from utils.mt5_client import Mt5Client, Mt5ConnectionParams
 
 logging.basicConfig(
@@ -40,7 +41,7 @@ KEY_FIELDS = [
 ]
 
 
-def pick_fields(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+def pick_fields(d: dict[str, Any], keys: list[str]) -> dict[str, Any]:
     return {k: d.get(k) for k in keys if k in d}
 
 
@@ -67,7 +68,11 @@ def main() -> None:
 
         info = c.symbol_info(symbol)
 
-        logger.info("Key fields for %s:\n%s", symbol, json.dumps(pick_fields(info, KEY_FIELDS), indent=2, default=str))
+        logger.info(
+            "Key fields for %s:\n%s",
+            symbol,
+            json.dumps(pick_fields(info, KEY_FIELDS), indent=2, default=str),
+        )
         logger.info("Full SymbolInfo for %s:\n%s", symbol, json.dumps(info, indent=2, default=str))
 
     finally:

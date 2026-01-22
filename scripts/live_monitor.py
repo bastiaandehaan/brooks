@@ -14,28 +14,27 @@ python scripts/live_monitor.py --symbol US500.cash --risk-pct 0.5 --regime-filte
 
 from __future__ import annotations
 
+import argparse
+import logging
 import os
 import sys
 import time
-import argparse
-import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
-import pandas as pd
 import MetaTrader5 as mt5
+import pandas as pd
 
 # project root on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.mt5_client import Mt5Client
-from utils.mt5_data import fetch_rates, RatesRequest
+from execution.ftmo_guardian import FTMOAccountType, FTMOGuardian
+from execution.guardrails import Guardrails, apply_guardrails
+from execution.risk_manager import RiskManager
 from strategies.context import Trend, TrendParams, infer_trend_m15
 from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from strategies.regime import RegimeParams, should_trade_today
-from execution.guardrails import Guardrails, apply_guardrails
-from execution.risk_manager import RiskManager
-from execution.ftmo_guardian import FTMOGuardian, FTMOAccountType
+from utils.mt5_client import Mt5Client
+from utils.mt5_data import RatesRequest, fetch_rates
 from utils.telegram_bot import TelegramBot, TradingSignal
 
 # Optional debug logger (best-effort)
@@ -56,9 +55,9 @@ NY_TZ = "America/New_York"
 @dataclass(frozen=True)
 class SessionConfig:
     tz: str = NY_TZ
-    session_start: str = "09:30"   # ET
-    session_end: str = "16:00"     # ET (NYSE cash close)
-    trade_cutoff: str = "15:30"    # ET (no new trades after this time)
+    session_start: str = "09:30"  # ET
+    session_end: str = "16:00"  # ET (NYSE cash close)
+    trade_cutoff: str = "15:30"  # ET (no new trades after this time)
 
 
 def _parse_hhmm(hhmm: str) -> pd.Timestamp:
@@ -70,7 +69,7 @@ def now_ny() -> pd.Timestamp:
     return pd.Timestamp.now(tz=NY_TZ)
 
 
-def session_state(cfg: SessionConfig, ts: Optional[pd.Timestamp] = None) -> Tuple[str, pd.Timestamp]:
+def session_state(cfg: SessionConfig, ts: pd.Timestamp | None = None) -> tuple[str, pd.Timestamp]:
     """
     Returns (state, now_ny_ts) where state ∈ {"OUTSIDE", "ACTIVE", "CUTOFF"}.
 
@@ -92,13 +91,13 @@ def session_state(cfg: SessionConfig, ts: Optional[pd.Timestamp] = None) -> Tupl
     return "ACTIVE", ts_ny
 
 
-def check_emergency_stop(project_root: Optional[str] = None) -> tuple[bool, Optional[str]]:
+def check_emergency_stop(project_root: str | None = None) -> tuple[bool, str | None]:
     """STOP.txt in project root stops the monitor."""
     root = project_root or os.getcwd()
     stop_file = os.path.join(root, "STOP.txt")
     if os.path.exists(stop_file):
         try:
-            reason = open(stop_file, "r", encoding="utf-8", errors="ignore").read().strip()
+            reason = open(stop_file, encoding="utf-8", errors="ignore").read().strip()
             return True, reason if reason else "Emergency stop activated"
         except Exception:
             return True, "Emergency stop file found"
@@ -121,9 +120,9 @@ def check_for_signals(
     regime_filter: bool,
     chop_threshold: float,
     stop_buffer: float,
-    ftmo_guardian: Optional[FTMOGuardian],
+    ftmo_guardian: FTMOGuardian | None,
     telegram_bot: TelegramBot,
-    debug_logger: Optional["DebugLogger"],
+    debug_logger: DebugLogger | None,
 ) -> bool:
     """
     Check for Brooks signals and send Telegram notification if found.
@@ -131,8 +130,8 @@ def check_for_signals(
     """
     logger.info("🔍 Checking for signals...")
 
-    m15_data: Optional[pd.DataFrame] = None
-    m5_data: Optional[pd.DataFrame] = None
+    m15_data: pd.DataFrame | None = None
+    m5_data: pd.DataFrame | None = None
 
     config = {
         "symbol": symbol,
@@ -163,7 +162,9 @@ def check_for_signals(
         m5_data = _hygiene(fetch_rates(mt5, req_m5))
 
         if m15_data.empty or m5_data.empty:
-            logger.warning("⚠️ Empty dataframes from MT5 (m15=%s, m5=%s)", len(m15_data), len(m5_data))
+            logger.warning(
+                "⚠️ Empty dataframes from MT5 (m15=%s, m5=%s)", len(m15_data), len(m5_data)
+            )
             client.shutdown()
             return False
 
@@ -193,7 +194,9 @@ def check_for_signals(
         # Trend inference (M15)
         tparams = TrendParams()
         trend, trend_reason = infer_trend_m15(m15_data, tparams)
-        logger.info("Trend: %s (%s)", trend.value if hasattr(trend, "value") else str(trend), trend_reason)
+        logger.info(
+            "Trend: %s (%s)", trend.value if hasattr(trend, "value") else str(trend), trend_reason
+        )
 
         if trend not in (Trend.BULL, Trend.BEAR):
             logger.info("No clear trend")
@@ -203,7 +206,9 @@ def check_for_signals(
         side = Side.LONG if trend == Trend.BULL else Side.SHORT
 
         # Plan trade (NEXT_OPEN contract)
-        hparams = H2L2Params(min_risk_price_units=1.0, signal_close_frac=0.30, pullback_bars=2, cooldown_bars=0)
+        hparams = H2L2Params(
+            min_risk_price_units=1.0, signal_close_frac=0.30, pullback_bars=2, cooldown_bars=0
+        )
         planned = plan_next_open_trade(m5_data, side, spec, hparams, timeframe_minutes=5)
 
         if not planned:
@@ -239,7 +244,10 @@ def check_for_signals(
 
         accepted, rejected = apply_guardrails([planned], g)
         if not accepted:
-            logger.info("Guardrails rejected trade (reason=%s)", rejected[0].reason if rejected else "unknown")
+            logger.info(
+                "Guardrails rejected trade (reason=%s)",
+                rejected[0].reason if rejected else "unknown",
+            )
             client.shutdown()
             return False
 
@@ -324,7 +332,7 @@ def run_monitor(
     telegram_bot = TelegramBot()
 
     # FTMO Guardian (optional)
-    ftmo_guardian: Optional[FTMOGuardian] = None
+    ftmo_guardian: FTMOGuardian | None = None
     if enable_ftmo_protection:
         try:
             account_type = (
@@ -364,7 +372,12 @@ def run_monitor(
                 break
 
             state, ts_ny = session_state(cfg)
-            logger.info("NY time now: %s ET | state=%s | check=%d", ts_ny.strftime("%H:%M:%S"), state, iteration)
+            logger.info(
+                "NY time now: %s ET | state=%s | check=%d",
+                ts_ny.strftime("%H:%M:%S"),
+                state,
+                iteration,
+            )
 
             if state == "OUTSIDE":
                 logger.info("⏸️ Outside NY session - sleeping %ss...", check_interval)
@@ -373,7 +386,9 @@ def run_monitor(
 
             if state == "CUTOFF":
                 # This is the key “extra”: stay alive, but do nothing new late-session.
-                logger.info("🟠 Cutoff window active (no new trades). Sleeping %ss...", check_interval)
+                logger.info(
+                    "🟠 Cutoff window active (no new trades). Sleeping %ss...", check_interval
+                )
                 time.sleep(check_interval)
                 continue
 
@@ -416,7 +431,9 @@ def main() -> int:
     parser.add_argument("--chop-threshold", type=float, default=2.0)
     parser.add_argument("--stop-buffer", type=float, default=1.0)
     parser.add_argument("--interval", type=int, default=30, help="Seconds between checks")
-    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
 
     # Session config overrides
     parser.add_argument("--session-start", default="09:30")

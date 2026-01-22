@@ -90,7 +90,13 @@ def rates_to_df(rates: Any, *, require_ohlc: bool = True) -> pd.DataFrame:
 def fetch_rates(mt5, req: RatesRequest, *, require_ohlc: bool = True) -> pd.DataFrame:
     """Fetch rates in a single MT5 call."""
     _validate_rates_request(req)
-    logger.info("Fetching rates: symbol=%s tf=%s pos=%s count=%s", req.symbol, req.timeframe, req.pos, req.count)
+    logger.info(
+        "Fetching rates: symbol=%s tf=%s pos=%s count=%s",
+        req.symbol,
+        req.timeframe,
+        req.pos,
+        req.count,
+    )
 
     rates = mt5.copy_rates_from_pos(req.symbol, req.timeframe, req.pos, req.count)
     if rates is None:

@@ -3,11 +3,11 @@
 FTMO Challenge Rule Enforcer
 Prevents violations that would fail the challenge
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 class FTMOAccountType(Enum):
     """FTMO account types with different rules"""
+
     CHALLENGE_10K = "10k"
     CHALLENGE_25K = "25k"
     CHALLENGE_50K = "50k"
@@ -37,6 +38,7 @@ class FTMORules:
     5. No weekend holding (optional but recommended)
     6. No news trading in first 2 minutes
     """
+
     account_type: FTMOAccountType
     initial_balance: float
 
@@ -109,12 +111,12 @@ class FTMOGuardian:
         self.max_total_loss_usd = rules.initial_balance * rules.max_total_loss_pct / 100
 
         # Calculate safe buffers (stop BEFORE limits)
-        self.safe_daily_loss_usd = rules.initial_balance * (
-                rules.max_daily_loss_pct - rules.daily_loss_buffer_pct
-        ) / 100
-        self.safe_total_loss_usd = rules.initial_balance * (
-                rules.max_total_loss_pct - rules.total_loss_buffer_pct
-        ) / 100
+        self.safe_daily_loss_usd = (
+            rules.initial_balance * (rules.max_daily_loss_pct - rules.daily_loss_buffer_pct) / 100
+        )
+        self.safe_total_loss_usd = (
+            rules.initial_balance * (rules.max_total_loss_pct - rules.total_loss_buffer_pct) / 100
+        )
 
         logger.info("FTMO Guardian initialized:")
         logger.info(f"  Account Type: {rules.account_type.value}")
@@ -125,11 +127,11 @@ class FTMOGuardian:
         logger.info(f"  Safe Total Loss: ${self.safe_total_loss_usd:,.2f} (with buffer)")
 
     def can_trade(
-            self,
-            current_balance: float,
-            daily_pnl: float,
-            open_risk: float = 0.0,
-            check_time: bool = True
+        self,
+        current_balance: float,
+        daily_pnl: float,
+        open_risk: float = 0.0,
+        check_time: bool = True,
     ) -> tuple[bool, str]:
         """
         Check if trading is allowed
@@ -205,11 +207,7 @@ class FTMOGuardian:
         # All checks passed
         return True, "OK - All FTMO rules satisfied"
 
-    def get_max_allowed_risk(
-            self,
-            current_balance: float,
-            daily_pnl: float
-    ) -> float:
+    def get_max_allowed_risk(self, current_balance: float, daily_pnl: float) -> float:
         """
         Calculate maximum allowed risk for next trade
 
@@ -233,11 +231,7 @@ class FTMOGuardian:
         return max(0, max_risk)
 
     def get_account_status(
-            self,
-            current_balance: float,
-            daily_pnl: float,
-            total_trades: int = 0,
-            trading_days: int = 0
+        self, current_balance: float, daily_pnl: float, total_trades: int = 0, trading_days: int = 0
     ) -> dict:
         """
         Get comprehensive account status report
@@ -255,7 +249,9 @@ class FTMOGuardian:
         # Calculate profit progress
         total_profit = current_balance - self.initial_balance
         profit_target_usd = self.initial_balance * self.rules.profit_target_pct / 100
-        profit_progress_pct = (total_profit / profit_target_usd) * 100 if profit_target_usd > 0 else 0
+        profit_progress_pct = (
+            (total_profit / profit_target_usd) * 100 if profit_target_usd > 0 else 0
+        )
 
         # Determine account health
         if daily_loss_pct > 90 or total_loss_pct > 90:
@@ -291,25 +287,25 @@ class FTMOGuardian:
         print("\n" + "=" * 60)
         print(f"  📊 FTMO ACCOUNT STATUS: {status['health']}")
         print("=" * 60)
-        print(f"\n💰 BALANCE:")
+        print("\n💰 BALANCE:")
         print(f"  Current  : ${status['current_balance']:,.2f}")
         print(f"  Initial  : ${status['initial_balance']:,.2f}")
         print(f"  Profit   : ${status['total_profit']:+,.2f}")
 
-        print(f"\n📉 DAILY RISK:")
+        print("\n📉 DAILY RISK:")
         print(f"  Today P&L: ${status['daily_pnl']:+,.2f}")
         print(f"  Daily Loss: ${status['daily_loss']:,.2f} / ${status['daily_loss_limit']:,.2f}")
         print(f"  Usage    : {status['daily_loss_pct']:.1f}% of limit")
 
-        print(f"\n📊 TOTAL DRAWDOWN:")
+        print("\n📊 TOTAL DRAWDOWN:")
         print(f"  Drawdown : ${status['total_drawdown']:,.2f} / ${status['total_loss_limit']:,.2f}")
         print(f"  Usage    : {status['total_loss_pct']:.1f}% of limit")
 
-        print(f"\n🎯 PROFIT TARGET:")
+        print("\n🎯 PROFIT TARGET:")
         print(f"  Target   : ${status['profit_target']:,.2f}")
         print(f"  Progress : {status['profit_progress_pct']:.1f}%")
 
-        print(f"\n📅 TRADING ACTIVITY:")
+        print("\n📅 TRADING ACTIVITY:")
         print(f"  Trades   : {status['total_trades']}")
         print(f"  Days     : {status['trading_days']} / {status['min_trading_days']} minimum")
 
@@ -330,37 +326,26 @@ if __name__ == "__main__":
     can_trade, reason = guardian.can_trade(
         current_balance=10050,  # Up $50
         daily_pnl=50,  # Profit today
-        open_risk=50  # Next trade risk
+        open_risk=50,  # Next trade risk
     )
     print(f"Can trade: {can_trade}")
     print(f"Reason: {reason}")
 
     # Scenario 2: After some losses
     print("\n📋 SCENARIO 2: After -$300 loss today")
-    can_trade, reason = guardian.can_trade(
-        current_balance=9700,
-        daily_pnl=-300,
-        open_risk=50
-    )
+    can_trade, reason = guardian.can_trade(current_balance=9700, daily_pnl=-300, open_risk=50)
     print(f"Can trade: {can_trade}")
     print(f"Reason: {reason}")
 
     # Scenario 3: Approaching daily limit
     print("\n📋 SCENARIO 3: Approaching daily limit (-$380)")
-    can_trade, reason = guardian.can_trade(
-        current_balance=9620,
-        daily_pnl=-380,
-        open_risk=50
-    )
+    can_trade, reason = guardian.can_trade(current_balance=9620, daily_pnl=-380, open_risk=50)
     print(f"Can trade: {can_trade}")
     print(f"Reason: {reason}")
 
     # Get account status
     print("\n📊 ACCOUNT STATUS:")
     status = guardian.get_account_status(
-        current_balance=9620,
-        daily_pnl=-380,
-        total_trades=25,
-        trading_days=5
+        current_balance=9620, daily_pnl=-380, total_trades=25, trading_days=5
     )
     guardian.print_status(status)

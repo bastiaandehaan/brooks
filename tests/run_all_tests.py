@@ -104,10 +104,11 @@ def main():
         return 0
     else:
         print("\n❌ TESTS FAILED - Review output above")
+
         print("\nDebugging tips:")
         print("  • Check MT5 is running and logged in")
         print("  • Verify US500.cash symbol is available")
         print("  • Check timezone settings (should be UTC)")
         return 1
-    if __name__ == "__main__":
+    if name == "main":
         sys.exit(main())

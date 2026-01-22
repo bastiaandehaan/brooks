@@ -1,22 +1,37 @@
+# backtest/optimizer.py
+"""
+Simple parameter optimizer for Brooks strategy
+"""
+
+import os
+import sys
+
+# FIX: Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import itertools
+
 import pandas as pd
-from runner import run_backtest  # Importeer je verbeterde functie
+
+# FIX: Import from correct location
+from backtest.runner import run_backtest
 
 
 def start_optimization():
+    """Run basic parameter grid search"""
     # --- CONFIGURATIE ---
     SYMBOL = "US500.cash"
     DAYS = 60
-    COSTS = 0.04  # Reken altijd met kosten!
+    COSTS = 0.04
 
     # --- DE PARAMETER GRID ---
-    # Pas de waarden hieronder aan om meer of minder combinaties te testen
     grid = {
-        'ema_period': [10, 20, 50],
-        'pullback_bars': [2, 3, 5],
-        'signal_close_frac': [0.20, 0.30, 0.45],
-        'chop_threshold': [1.5, 2.5, 3.5],
-        'regime_filter': [True]
+        "ema_period": [15, 20],
+        "pullback_bars": [3, 4],
+        "signal_close_frac": [0.25, 0.30],
+        "chop_threshold": [2.0, 2.5],
+        "regime_filter": [True],
+        "stop_buffer": [1.5, 2.0],
     }
 
     # Maak alle combinaties
@@ -31,51 +46,80 @@ def start_optimization():
     print("-" * 50)
 
     for i, params in enumerate(combinations, 1):
-        print(f"[{i}/{total}] Testen: EMA={params['ema_period']}, PB={params['pullback_bars']}, "
-              f"Frac={params['signal_close_frac']}, Chop={params['chop_threshold']}")
+        print(f"[{i}/{total}] Testing...", end="", flush=True)
 
-        # Voer de backtest uit met de parameters uit de grid
+        # Voer de backtest uit
         res = run_backtest(
             symbol=SYMBOL,
             days=DAYS,
-            ema_period=params['ema_period'],
-            pullback_bars=params['pullback_bars'],
-            signal_close_frac=params['signal_close_frac'],
-            regime_filter=params['regime_filter'],
-            chop_threshold=params['chop_threshold'],
-            costs_per_trade_r=COSTS
+            ema_period=params["ema_period"],
+            pullback_bars=params["pullback_bars"],
+            signal_close_frac=params["signal_close_frac"],
+            regime_filter=params["regime_filter"],
+            chop_threshold=params["chop_threshold"],
+            stop_buffer=params["stop_buffer"],
+            costs_per_trade_r=COSTS,
+            min_slope=0.15,  # Fixed
+            min_risk_price_units=2.0,  # Fixed
+            cooldown_bars=10,  # Fixed
+            max_trades_day=2,  # Fixed
         )
 
-        # Als er trades zijn gedaan, sla het resultaat op
+        # Check if successful
         if "error" not in res and res.get("trades", 0) > 0:
-            # Voeg de gebruikte parameters toe aan de resultaten voor de analyse
             row = {**params, **res}
             all_results.append(row)
+            print(f" ✓ Sharpe={res.get('daily_sharpe_r', 0):.3f}, Net={res.get('net_r', 0):.1f}R")
         else:
-            print("   ⚠️ Geen trades gevonden voor deze combinatie.")
+            print(" ✗ Failed")
 
     # --- ANALYSE ---
     if not all_results:
-        print("❌ Geen enkele combinatie leverde trades op.")
+        print("❌ Geen resultaten gevonden")
         return
 
     df = pd.DataFrame(all_results)
 
-    # Sorteer op Sharpe Ratio (beste maatstaf voor stabiliteit)
-    # Of gebruik 'net_r' voor maximale winst
+    # Sorteer op Daily Sharpe
     top_sharpe = df.sort_values("daily_sharpe_r", ascending=False).head(5)
 
     print("\n" + "=" * 80)
-    print("🏆 TOP 5 PARAMETER COMBINATIES (Geselecteerd op Daily Sharpe)")
+    print("🏆 TOP 5 CONFIGURATIES (Geselecteerd op Daily Sharpe)")
     print("=" * 80)
 
-    cols_to_show = ['ema_period', 'pullback_bars', 'signal_close_frac', 'chop_threshold', 'net_r', 'daily_sharpe_r',
-                    'trades', 'winrate']
+    cols_to_show = [
+        "ema_period",
+        "pullback_bars",
+        "signal_close_frac",
+        "chop_threshold",
+        "stop_buffer",
+        "net_r",
+        "daily_sharpe_r",
+        "trades",
+        "winrate",
+    ]
     print(top_sharpe[cols_to_show].to_string(index=False))
 
-    # Opslaan naar CSV voor diepere analyse in Excel
+    # Opslaan
     df.to_csv("optimization_results.csv", index=False)
-    print(f"\n✅ Alle resultaten zijn opgeslagen in 'optimization_results.csv'")
+    print(f"\n✅ Alle resultaten opgeslagen in 'optimization_results.csv'")
+
+    # Best config
+    best = top_sharpe.iloc[0]
+    print("\n" + "=" * 80)
+    print("🎯 BESTE CONFIGURATIE:")
+    print("=" * 80)
+    print(f"  EMA Period       : {best['ema_period']}")
+    print(f"  Pullback Bars    : {best['pullback_bars']}")
+    print(f"  Signal Close Frac: {best['signal_close_frac']:.2f}")
+    print(f"  Chop Threshold   : {best['chop_threshold']:.1f}")
+    print(f"  Stop Buffer      : {best['stop_buffer']:.1f}")
+    print(f"\n  📊 PERFORMANCE:")
+    print(f"  Daily Sharpe     : {best['daily_sharpe_r']:.3f}")
+    print(f"  Net R            : {best['net_r']:+.1f}R")
+    print(f"  Trades           : {best['trades']}")
+    print(f"  Winrate          : {best['winrate'] * 100:.1f}%")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

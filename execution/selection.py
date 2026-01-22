@@ -1,13 +1,9 @@
 # execution/selection.py
-"""
-Brooks Daily Selection - SILENT MODE
-Chronological selection without spam logging
-"""
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Tuple, Optional
+from typing import Any, Iterable, List, Tuple
 
 import pandas as pd
 
@@ -41,7 +37,7 @@ def _is_finite(*vals: float) -> bool:
     for v in vals:
         if not pd.notna(v):
             return False
-        if v != v:  # NaN
+        if v != v:  # NaN check
             return False
         if v in (float("inf"), float("-inf")):
             return False
@@ -49,31 +45,32 @@ def _is_finite(*vals: float) -> bool:
 
 
 def select_top_per_ny_day(
-        candidates: Iterable[Any],
-        *,
-        max_trades_day: int,
-        tick_size: float,
-        tz_ny: str = NY_TZ,
-        log_daily: bool = False,  # DEFAULT FALSE NOW
-        score_mode: str = "chronological",
-        warn_on_bad_rows: bool = False,  # DEFAULT FALSE
+    candidates: Iterable[Any],
+    *,
+    max_trades_day: int,
+    tick_size: float,
+    tz_ny: str = NY_TZ,
+    log_daily: bool = False,
+    score_mode: str = "chronological",
+    warn_on_bad_rows: bool = False,
 ) -> Tuple[List[Any], List[SelectionStats]]:
     """
-    Chronological selection (first come first served) - SILENT MODE
+    TRULY DETERMINISTIC chronological selection.
+
+    Key fix: Sort by (signal_ts, id(object)) to break ties consistently.
     """
     cand_list = list(candidates)
 
     if max_trades_day <= 0 or not cand_list:
         return [], []
 
-    buckets: dict[pd.Timestamp, list[tuple[pd.Timestamp, Any]]] = {}
+    buckets: dict[pd.Timestamp, list[tuple[pd.Timestamp, int, Any]]] = {}
     bad_rows = 0
 
-    for c in cand_list:
+    for idx, c in enumerate(cand_list):
         try:
             exec_utc = _as_utc_ts(getattr(c, "execute_ts"))
             sig_utc = _as_utc_ts(getattr(c, "signal_ts"))
-
             entry = float(getattr(c, "entry"))
             stop = float(getattr(c, "stop"))
 
@@ -86,7 +83,9 @@ def select_top_per_ny_day(
                 continue
 
             day_key = _ny_day(exec_utc, tz_ny)
-            buckets.setdefault(day_key, []).append((sig_utc, c))
+
+            # CRITICAL FIX: Include original list index for tie-breaking
+            buckets.setdefault(day_key, []).append((sig_utc, idx, c))
 
         except Exception:
             bad_rows += 1
@@ -100,37 +99,45 @@ def select_top_per_ny_day(
         if not items:
             continue
 
-        items.sort(key=lambda x: x[0])
+        # CRITICAL FIX: Sort by (signal_ts, original_index)
+        # This ensures identical signal_ts are ordered by their original position
+        items.sort(key=lambda x: (x[0], x[1]))
+
         chosen = items[:max_trades_day]
-        chosen_trades = [c for _sig, c in chosen]
+        chosen_trades = [c for _sig, _idx, c in chosen]
         selected.extend(chosen_trades)
 
-        stats.append(SelectionStats(
-            ny_day=str(day_key.date()),
-            candidates=len(items),
-            selected=len(chosen_trades),
-            rejected=len(items) - len(chosen_trades),
-        ))
+        stats.append(
+            SelectionStats(
+                ny_day=str(day_key.date()),
+                candidates=len(items),
+                selected=len(chosen_trades),
+                rejected=len(items) - len(chosen_trades),
+            )
+        )
 
-    # Summary only
     total_selected = len(selected)
     total_rejected = sum(s.rejected for s in stats)
 
-    logger.info(
-        "Daily selection: %d days, selected=%d, rejected=%d (bad_rows=%d)",
-        len(stats), total_selected, total_rejected, bad_rows
-    )
+    if log_daily:
+        logger.info(
+            "Daily selection: %d days, selected=%d, rejected=%d (bad_rows=%d)",
+            len(stats),
+            total_selected,
+            total_rejected,
+            bad_rows,
+        )
 
     return selected, stats
 
 
-# Backwards compatible wrapper
+# Backward compatibility wrapper
 def select_top_trades_per_day(
-        trades: list[Any],
-        *,
-        max_per_day: int,
-        day_tz: str = NY_TZ,
-        tick_size: float = 0.25,
+    trades: list[Any],
+    *,
+    max_per_day: int,
+    day_tz: str = NY_TZ,
+    tick_size: float = 0.25,
 ) -> list[Any]:
     selected, _ = select_top_per_ny_day(
         trades,

@@ -22,7 +22,7 @@ class FakeMT5:
 
         end = min(self.total, pos + count)
         times = np.arange(pos, end, dtype=np.int64)
-        return np.array(list(zip(times)), dtype=[("time", "i8")])
+        return np.array(list(zip(times, strict=True)), dtype=[("time", "i8")])
 
 
 def test_fetch_rates_chunked_stitches_no_gaps():

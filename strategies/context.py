@@ -3,11 +3,11 @@
 Brooks Trend Filter - SIMPEL en EFFECTIEF
 Regel: Trade met de trend. Trend = EMA richting + prijs positie.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 import pandas as pd
 
@@ -33,7 +33,7 @@ class TrendMetrics:
     close_above_ema: bool
 
 
-def infer_trend_m15(m15: pd.DataFrame, p: TrendParams) -> tuple[Optional[Trend], TrendMetrics]:
+def infer_trend_m15(m15: pd.DataFrame, p: TrendParams) -> tuple[Trend | None, TrendMetrics]:
     """
     Brooks Trend Rule (simpel):
     - BULL: close > EMA EN EMA stijgend

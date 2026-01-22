@@ -14,26 +14,26 @@ Voor elk timeframe:
 2. Bepaal maximum dat FTMO vrijgeeft
 3. Verifieer echte calendar coverage
 """
-import sys
+
 import os
-from datetime import datetime, timedelta
+import sys
+
 import MetaTrader5 as mt5
-import pandas as pd
 
 # Add project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.mt5_client import Mt5Client
-from utils.mt5_data import fetch_rates, RatesRequest
+from utils.mt5_data import RatesRequest, fetch_rates
 
 
 def test_timeframe_limit(
-        mt5_client,
-        symbol: str,
-        timeframe: int,
-        timeframe_name: str,
-        bars_per_day: int,
-        test_counts: list[int]
+    mt5_client,
+    symbol: str,
+    timeframe: int,
+    timeframe_name: str,
+    bars_per_day: int,
+    test_counts: list[int],
 ):
     """
     Test een specifiek timeframe met verschillende bar counts
@@ -45,11 +45,7 @@ def test_timeframe_limit(
     print(f"  TESTING {timeframe_name} TIMEFRAME")
     print("=" * 80)
 
-    results = {
-        'timeframe': timeframe_name,
-        'bars_per_day': bars_per_day,
-        'tests': []
-    }
+    results = {"timeframe": timeframe_name, "bars_per_day": bars_per_day, "tests": []}
 
     for requested in test_counts:
         print(f"\n→ Requesting {requested:,} bars ({requested / bars_per_day:.1f} days)...")
@@ -59,13 +55,15 @@ def test_timeframe_limit(
             data = fetch_rates(mt5_client._mt5, req)
 
             if data.empty:
-                print(f"   ❌ FAILED: Empty dataset")
-                results['tests'].append({
-                    'requested': requested,
-                    'received': 0,
-                    'success': False,
-                    'error': 'Empty dataset'
-                })
+                print("   ❌ FAILED: Empty dataset")
+                results["tests"].append(
+                    {
+                        "requested": requested,
+                        "received": 0,
+                        "success": False,
+                        "error": "Empty dataset",
+                    }
+                )
                 continue
 
             received = len(data)
@@ -83,30 +81,31 @@ def test_timeframe_limit(
             print(f"   Coverage   : {calendar_days} calendar days")
             print(f"   Trading days: ~{received / bars_per_day:.1f} days")
 
-            results['tests'].append({
-                'requested': requested,
-                'received': received,
-                'first_bar': str(first_bar),
-                'last_bar': str(last_bar),
-                'calendar_days': calendar_days,
-                'trading_days': received / bars_per_day,
-                'success': success,
-                'coverage_pct': (received / requested) * 100
-            })
+            results["tests"].append(
+                {
+                    "requested": requested,
+                    "received": received,
+                    "first_bar": str(first_bar),
+                    "last_bar": str(last_bar),
+                    "calendar_days": calendar_days,
+                    "trading_days": received / bars_per_day,
+                    "success": success,
+                    "coverage_pct": (received / requested) * 100,
+                }
+            )
 
         except Exception as e:
             print(f"   ❌ ERROR: {e}")
-            results['tests'].append({
-                'requested': requested,
-                'received': 0,
-                'success': False,
-                'error': str(e)
-            })
+            results["tests"].append(
+                {"requested": requested, "received": 0, "success": False, "error": str(e)}
+            )
 
     return results
 
 
-def find_exact_limit(mt5_client, symbol: str, timeframe: int, timeframe_name: str, bars_per_day: int):
+def find_exact_limit(
+    mt5_client, symbol: str, timeframe: int, timeframe_name: str, bars_per_day: int
+):
     """
     Binary search om exacte limiet te vinden
     """
@@ -143,7 +142,9 @@ def find_exact_limit(mt5_client, symbol: str, timeframe: int, timeframe_name: st
             high = mid - 1000
 
     if exact_limit:
-        print(f"\n🎯 EXACT LIMIT: {exact_limit:,} bars ({exact_limit / bars_per_day:.1f} trading days)")
+        print(
+            f"\n🎯 EXACT LIMIT: {exact_limit:,} bars ({exact_limit / bars_per_day:.1f} trading days)"
+        )
     else:
         print(f"\n⚠️  Could not determine exact limit (below {low:,} bars)")
 
@@ -177,7 +178,10 @@ def main():
     print("=" * 80)
 
     m1_results = test_timeframe_limit(
-        client, symbol, mt5.TIMEFRAME_M1, "M1",
+        client,
+        symbol,
+        mt5.TIMEFRAME_M1,
+        "M1",
         bars_per_day=1440,
         test_counts=[
             1440,  # 1 dag
@@ -185,7 +189,7 @@ def main():
             1440 * 30,  # 1 maand
             1440 * 60,  # 2 maanden
             1440 * 90,  # 3 maanden
-        ]
+        ],
     )
     all_results.append(m1_results)
 
@@ -200,7 +204,10 @@ def main():
     print("=" * 80)
 
     m5_results = test_timeframe_limit(
-        client, symbol, mt5.TIMEFRAME_M5, "M5",
+        client,
+        symbol,
+        mt5.TIMEFRAME_M5,
+        "M5",
         bars_per_day=288,
         test_counts=[
             288 * 30,  # 1 maand
@@ -209,7 +216,7 @@ def main():
             288 * 340,  # 340 dagen (jouw test)
             288 * 365,  # 1 jaar
             288 * 500,  # 500 dagen
-        ]
+        ],
     )
     all_results.append(m5_results)
 
@@ -223,7 +230,10 @@ def main():
     print("=" * 80)
 
     m15_results = test_timeframe_limit(
-        client, symbol, mt5.TIMEFRAME_M15, "M15",
+        client,
+        symbol,
+        mt5.TIMEFRAME_M15,
+        "M15",
         bars_per_day=96,
         test_counts=[
             96 * 90,  # 3 maanden
@@ -233,7 +243,7 @@ def main():
             96 * 365,  # 1 jaar
             96 * 365 * 2,  # 2 jaar
             96 * 365 * 3,  # 3 jaar
-        ]
+        ],
     )
     all_results.append(m15_results)
 
@@ -247,14 +257,17 @@ def main():
     print("=" * 80)
 
     h1_results = test_timeframe_limit(
-        client, symbol, mt5.TIMEFRAME_H1, "H1",
+        client,
+        symbol,
+        mt5.TIMEFRAME_H1,
+        "H1",
         bars_per_day=24,
         test_counts=[
             24 * 365,  # 1 jaar
             24 * 365 * 2,  # 2 jaar
             24 * 365 * 3,  # 3 jaar
             24 * 365 * 5,  # 5 jaar
-        ]
+        ],
     )
     all_results.append(h1_results)
 
@@ -269,20 +282,20 @@ def main():
     print("-" * 80)
 
     for result in all_results:
-        tf = result['timeframe']
-        bars_per_day = result['bars_per_day']
+        tf = result["timeframe"]
+        bars_per_day = result["bars_per_day"]
 
         # Find highest successful test
-        successful = [t for t in result['tests'] if t['success']]
+        successful = [t for t in result["tests"] if t["success"]]
         if successful:
-            max_bars = max(t['received'] for t in successful)
+            max_bars = max(t["received"] for t in successful)
             max_days = max_bars / bars_per_day
             status = "✅ OK"
         else:
             # Find highest partial
-            partial = [t for t in result['tests'] if t.get('received', 0) > 0]
+            partial = [t for t in result["tests"] if t.get("received", 0) > 0]
             if partial:
-                max_bars = max(t['received'] for t in partial)
+                max_bars = max(t["received"] for t in partial)
                 max_days = max_bars / bars_per_day
                 status = "⚠️  LIMITED"
             else:
@@ -303,15 +316,15 @@ def main():
     m15_requested = days * 96 * 2  # 65,280
     m5_requested = days * 288  # 97,920
 
-    print(f"\nYour backtest requests:")
+    print("\nYour backtest requests:")
     print(f"  M15: {m15_requested:,} bars ({m15_requested / 96:.1f} days)")
     print(f"  M5 : {m5_requested:,} bars ({m5_requested / 288:.1f} days)")
 
     # Check tegen limieten
-    m15_success = any(t['success'] for t in m15_results['tests'] if t['requested'] >= m15_requested)
-    m5_success = any(t['success'] for t in m5_results['tests'] if t['requested'] >= m5_requested)
+    m15_success = any(t["success"] for t in m15_results["tests"] if t["requested"] >= m15_requested)
+    m5_success = any(t["success"] for t in m5_results["tests"] if t["requested"] >= m5_requested)
 
-    print(f"\nCan FTMO provide this?")
+    print("\nCan FTMO provide this?")
     print(f"  M15: {'✅ YES' if m15_success else '❌ NO - EXCEEDS LIMIT!'}")
     print(f"  M5 : {'✅ YES' if m5_success else '❌ NO - EXCEEDS LIMIT!'}")
 

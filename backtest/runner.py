@@ -7,37 +7,43 @@ Strategy is unchanged. Only reporting/metrics:
 - Daily metrics computed on daily PnL in R-units (option 1)
 - PNG dashboard saved to backtest/backtest_png via visualiser
 """
+
 from __future__ import annotations
 
-import sys
-import os
-import time
-import numpy as np
 import argparse
 import logging
-import pandas as pd
-import MetaTrader5 as mt5
+import os
+import sys
+import time
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Any
+
+import MetaTrader5 as mt5
+import numpy as np
+import pandas as pd
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.insert(0, root_dir)
 
-from utils.mt5_client import Mt5Client
-from utils.mt5_data import fetch_rates, RatesRequest
-from strategies.context import TrendParams, Trend, infer_trend_m15_series
-from strategies.h2l2 import plan_h2l2_trades, H2L2Params, Side, PlannedTrade
-from strategies.regime import RegimeParams, detect_regime_series, MarketRegime
 from execution.guardrails import Guardrails, apply_guardrails
 from strategies.config import StrategyConfig
+from strategies.context import Trend, TrendParams, infer_trend_m15_series
+from strategies.h2l2 import H2L2Params, PlannedTrade, Side, plan_h2l2_trades
+from strategies.regime import MarketRegime, RegimeParams, detect_regime_series
+from utils.mt5_client import Mt5Client
+from utils.mt5_data import RatesRequest, fetch_rates
+
+# Keep config load (even if currently unused) to ensure production.yaml validity in CI.
 config = StrategyConfig.from_yaml("config/production.yaml")
 
-# Suppress guardrail spam logging
+# Suppress guardrail/selection spam logging
 import logging as _log
+
 _log.getLogger("execution.guardrails").setLevel(_log.WARNING)
 
 from execution.selection import select_top_per_ny_day
+
 _log.getLogger("execution.selection").setLevel(_log.WARNING)
 
 from backtest.visualiser import generate_performance_report
@@ -82,7 +88,7 @@ def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> tuple[flo
 
     If no hit, exit_ts is last available bar time.
     """
-    future = m5_data.loc[t.execute_ts:]
+    future = m5_data.loc[t.execute_ts :]
     last_ts = pd.to_datetime(future.index[-1]) if len(future) else pd.to_datetime(t.execute_ts)
 
     for ts, bar in future.iterrows():
@@ -117,9 +123,9 @@ def _apply_costs(result_r: float, costs_r: float) -> float:
 
 
 def _build_trades_dataframe(
-    final_trades: List[PlannedTrade],
-    results_r: List[float],
-    exit_ts_list: List[pd.Timestamp],
+    final_trades: list[PlannedTrade],
+    results_r: list[float],
+    exit_ts_list: list[pd.Timestamp],
     *,
     m5_data: pd.DataFrame,
     ny_tz: str,
@@ -173,7 +179,7 @@ def _build_trades_dataframe(
     return df
 
 
-def _max_consecutive_losses(trade_pnl: List[float]) -> int:
+def _max_consecutive_losses(trade_pnl: list[float]) -> int:
     max_run = 0
     run = 0
     for r in trade_pnl:
@@ -188,8 +194,8 @@ def _max_consecutive_losses(trade_pnl: List[float]) -> int:
 def _daily_series_from_trades(
     trades_df: pd.DataFrame,
     *,
-    start_dt: Optional[pd.Timestamp],
-    end_dt: Optional[pd.Timestamp],
+    start_dt: pd.Timestamp | None,
+    end_dt: pd.Timestamp | None,
     ny_tz: str,
 ) -> pd.Series:
     """
@@ -225,14 +231,14 @@ def _daily_series_from_trades(
 def _compute_manager_metrics_r_based(
     trades_df: pd.DataFrame,
     *,
-    daily_pnl_r: pd.Series,          # R per NY-day
+    daily_pnl_r: pd.Series,  # R per NY-day
     trading_days_per_year: int,
-    initial_capital: float,          # only for "% of initial" reporting
-) -> Dict[str, Any]:
+    initial_capital: float,  # only for "% of initial" reporting
+) -> dict[str, Any]:
     """
     Option 1: all daily risk/return metrics computed on daily PnL in R-units (no pct_change).
     """
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     if daily_pnl_r.empty:
         return out
 
@@ -326,7 +332,7 @@ def run_backtest(
     # METRICS
     initial_capital: float = 10000.0,
     trading_days_per_year: int = 252,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     client = Mt5Client(mt5_module=mt5)
     if not client.initialize():
         return {"error": "MT5 init failed"}
@@ -383,22 +389,34 @@ def run_backtest(
         close = m15_data["close"].astype(float)
 
         bar_range = high - low
-        atr = bar_range.rolling(regime_params.atr_period, min_periods=regime_params.atr_period).mean()
-        avg_atr = atr.rolling(regime_params.range_period, min_periods=regime_params.range_period).mean()
+        atr = bar_range.rolling(
+            regime_params.atr_period, min_periods=regime_params.atr_period
+        ).mean()
+        avg_atr = atr.rolling(
+            regime_params.range_period, min_periods=regime_params.range_period
+        ).mean()
 
-        range_high = close.rolling(regime_params.range_period, min_periods=regime_params.range_period).max()
-        range_low = close.rolling(regime_params.range_period, min_periods=regime_params.range_period).min()
+        range_high = close.rolling(
+            regime_params.range_period, min_periods=regime_params.range_period
+        ).max()
+        range_low = close.rolling(
+            regime_params.range_period, min_periods=regime_params.range_period
+        ).min()
         price_range = range_high - range_low
 
         threshold_range = regime_params.chop_threshold * avg_atr
         chop_ratio = (price_range / threshold_range).fillna(0.0)
 
-        regime_data = pd.DataFrame({"regime": regime_series, "chop_ratio": chop_ratio}, index=m15_data.index)
+        regime_data = pd.DataFrame(
+            {"regime": regime_series, "chop_ratio": chop_ratio}, index=m15_data.index
+        )
 
         logger.info("  Regime calc: %.2fs", time.perf_counter() - t0)
 
     # Trends
-    m15_trends = precalculate_trends(m15_data, TrendParams(min_slope=min_slope, ema_period=ema_period))
+    m15_trends = precalculate_trends(
+        m15_data, TrendParams(min_slope=min_slope, ema_period=ema_period)
+    )
 
     # Merge trends to M5
     trend_series = m15_trends.reset_index().rename(columns={"index": "ts"})
@@ -462,29 +480,30 @@ def run_backtest(
 
     total_bars = len(m5_data)
 
-    segments = []
-    current_trend = None
-    current_regime = None
+    segments: list[tuple[int, int, Side | None, MarketRegime | None]] = []
+    current_trend: Side | None = None
+    current_regime: MarketRegime | None = None
     segment_start = 50
 
-    for i in range(50, total_bars):
-        trend_val = m5_data.iloc[i]["trend"]
+    # FIX: use idx consistently (was incorrectly using `i`)
+    for idx in range(50, total_bars):
+        trend_val = m5_data.iloc[idx]["trend"]
         side = _trend_to_side(trend_val) if not pd.isna(trend_val) else None
 
-        regime_val = None
+        regime_val: MarketRegime | None = None
         if regime_filter:
-            regime_val = m5_data.iloc[i].get("regime", MarketRegime.UNKNOWN)
+            regime_val = m5_data.iloc[idx].get("regime", MarketRegime.UNKNOWN)
 
-        should_break = (side != current_trend)
+        should_break = side != current_trend
         if regime_filter:
             should_break = should_break or (regime_val != current_regime)
 
         if should_break:
-            if current_trend is not None and segment_start < i:
-                segments.append((segment_start, i, current_trend, current_regime))
+            if current_trend is not None and segment_start < idx:
+                segments.append((segment_start, idx, current_trend, current_regime))
             current_trend = side
             current_regime = regime_val
-            segment_start = i
+            segment_start = idx
 
     if current_trend is not None and segment_start < total_bars:
         segments.append((segment_start, total_bars, current_trend, current_regime))
@@ -515,19 +534,42 @@ def run_backtest(
     if regime_filter:
         logger.info(
             "  Planning: %.2fs, %d segments (%d choppy skipped, %d processed) → %d candidates",
-            planning_time, len(segments), skipped_choppy, processed_segments, len(planned_trades)
+            planning_time,
+            len(segments),
+            skipped_choppy,
+            processed_segments,
+            len(planned_trades),
         )
     else:
-        logger.info("  Planning: %.2fs, %d segments → %d candidates", planning_time, len(segments), len(planned_trades))
+        logger.info(
+            "  Planning: %.2fs, %d segments → %d candidates",
+            planning_time,
+            len(segments),
+            len(planned_trades),
+        )
 
     # Guardrails + selection (unchanged)
     logger.info("→ Applying guardrails (session + daily limit)...")
-    g_session = Guardrails(session_tz=NY_TZ, day_tz=NY_TZ, session_start="09:30", session_end="15:00", max_trades_per_day=10_000)
+    g_session = Guardrails(
+        session_tz=NY_TZ,
+        day_tz=NY_TZ,
+        session_start="09:30",
+        session_end="15:00",
+        max_trades_per_day=10_000,
+    )
     in_session, rejected1 = apply_guardrails(planned_trades, g_session)
 
-    selected, sel_stats = select_top_per_ny_day(in_session, max_trades_day=max_trades_day, tick_size=float(spec.tick_size))
+    selected, sel_stats = select_top_per_ny_day(
+        in_session, max_trades_day=max_trades_day, tick_size=float(spec.tick_size)
+    )
 
-    g_all = Guardrails(session_tz=NY_TZ, day_tz=NY_TZ, session_start="09:30", session_end="15:00", max_trades_per_day=max_trades_day)
+    g_all = Guardrails(
+        session_tz=NY_TZ,
+        day_tz=NY_TZ,
+        session_start="09:30",
+        session_end="15:00",
+        max_trades_per_day=max_trades_day,
+    )
     final_trades, rejected2 = apply_guardrails(selected, g_all)
 
     # Ensure time order for time-based charts (does not change which trades exist)
@@ -596,10 +638,14 @@ def run_backtest(
     max_consec_losses = _max_consecutive_losses(list(res.values))
 
     # Side breakdown (keep consistent with final_trades order)
-    long_results = [r for t, r in zip(final_trades, results_r) if t.side == Side.LONG]
-    short_results = [r for t, r in zip(final_trades, results_r) if t.side == Side.SHORT]
+    long_results = [r for t, r in zip(final_trades, results_r, strict=True) if t.side == Side.LONG]
+    short_results = [
+        r for t, r in zip(final_trades, results_r, strict=True) if t.side == Side.SHORT
+    ]
     long_wr = (sum(1 for r in long_results if r > 0) / len(long_results)) if long_results else 0.0
-    short_wr = (sum(1 for r in short_results if r > 0) / len(short_results)) if short_results else 0.0
+    short_wr = (
+        (sum(1 for r in short_results if r > 0) / len(short_results)) if short_results else 0.0
+    )
 
     # Period bounds
     period_start = m5_data.index[0] if len(m5_data) else None
@@ -615,7 +661,9 @@ def run_backtest(
     )
 
     # Daily PnL (R/day) indexed by NY date
-    daily_pnl_r = _daily_series_from_trades(trades_df, start_dt=period_start, end_dt=period_end, ny_tz=NY_TZ)
+    daily_pnl_r = _daily_series_from_trades(
+        trades_df, start_dt=period_start, end_dt=period_end, ny_tz=NY_TZ
+    )
 
     # Manager metrics (R-based)
     mgr = _compute_manager_metrics_r_based(
@@ -639,7 +687,9 @@ def run_backtest(
         print(f"  Gross profit   : {gross_profit:+.2f}R (before costs)")
         print(f"  Net profit     : {float(equity_curve.iloc[-1]):+.2f}R (after costs)")
         if gross_profit != 0:
-            print(f"  Impact         : {-total_cost:.2f}R ({-total_cost / gross_profit * 100:.1f}% reduction)")
+            print(
+                f"  Impact         : {-total_cost:.2f}R ({-total_cost / gross_profit * 100:.1f}% reduction)"
+            )
         else:
             print(f"  Impact         : {-total_cost:.2f}R")
 
@@ -664,17 +714,25 @@ def run_backtest(
         print(f"  Max DD (% of initial)  : {mgr.get('max_dd_pct_initial', 0.0):7.3f}%")
         print(f"  VaR 95% (R/day)        : {mgr.get('var_95_r', 0.0):7.3f}R")
         print(f"  CVaR 95% (R/day)       : {mgr.get('cvar_95_r', 0.0):7.3f}R")
-        print(f"  Best / Worst day (R)   : {mgr.get('best_day_r', 0.0):+7.2f} / {mgr.get('worst_day_r', 0.0):+7.2f}")
+        print(
+            f"  Best / Worst day (R)   : {mgr.get('best_day_r', 0.0):+7.2f} / {mgr.get('worst_day_r', 0.0):+7.2f}"
+        )
         print(f"  % positive days        : {mgr.get('pct_pos_days', 0.0):7.2f}%")
         print(f"  Max underwater (days)  : {mgr.get('max_underwater_days', 0)}")
         print(f"  Trades/day active      : {mgr.get('trades_per_active_day', 0.0):.2f}")
         print(f"  Trades/day calendar    : {mgr.get('trades_per_calendar_day', 0.0):.2f}")
-        print(f"  Skew / Kurtosis (R/day): {mgr.get('skew_r', 0.0):+.3f} / {mgr.get('kurtosis_r', 0.0):+.3f}")
+        print(
+            f"  Skew / Kurtosis (R/day): {mgr.get('skew_r', 0.0):+.3f} / {mgr.get('kurtosis_r', 0.0):+.3f}"
+        )
 
     print("\n📈 WIN/LOSS:")
     print(f"  Winrate       : {winrate * 100:6.2f}%")
-    print(f"  Winners       : {int((res > 0).sum()):4d} ({int((res > 0).sum()) / len(res) * 100:5.1f}%)")
-    print(f"  Losers        : {int((res < 0).sum()):4d} ({int((res < 0).sum()) / len(res) * 100:5.1f}%)")
+    print(
+        f"  Winners       : {int((res > 0).sum()):4d} ({int((res > 0).sum()) / len(res) * 100:5.1f}%)"
+    )
+    print(
+        f"  Losers        : {int((res < 0).sum()):4d} ({int((res < 0).sum()) / len(res) * 100:5.1f}%)"
+    )
     print(f"  Breakeven     : {int((res == 0).sum()):4d}")
 
     print("\n🧪 TRADE QUALITY:")
@@ -714,7 +772,7 @@ def run_backtest(
     )
 
     # Stats dict for PNG
-    stats: Dict[str, Any] = {
+    stats: dict[str, Any] = {
         # core trade-level
         "trades": int(len(res)),
         "net_r": float(equity_curve.iloc[-1]),
@@ -748,7 +806,7 @@ def run_backtest(
     stats.update(mgr)
 
     # Add long/short PF + net R
-    def _pf_and_net(values: List[float]) -> tuple[float, float]:
+    def _pf_and_net(values: list[float]) -> tuple[float, float]:
         if not values:
             return 0.0, 0.0
         s = pd.Series(values, dtype="float64")
@@ -775,9 +833,9 @@ def run_backtest(
 
     # Generate report
     generate_performance_report(
-        results_r=res,                 # time-indexed Series (entry_time)
-        equity_curve=equity_curve,     # time-indexed Series
-        drawdown=drawdown,             # time-indexed Series
+        results_r=res,  # time-indexed Series (entry_time)
+        equity_curve=equity_curve,  # time-indexed Series
+        drawdown=drawdown,  # time-indexed Series
         symbol=symbol,
         days=days,
         run_id=run_id,
@@ -786,7 +844,7 @@ def run_backtest(
         period_end=period_end,
         stats=stats,
         price_series=price_series,
-        daily_pnl=daily_pnl_r,         # NY date-indexed series
+        daily_pnl=daily_pnl_r,  # NY date-indexed series
     )
 
     client.shutdown()
@@ -820,11 +878,17 @@ if __name__ == "__main__":
     parser.add_argument("--cooldown", type=int, default=10)
 
     # Regime filter
-    parser.add_argument("--regime-filter", action="store_true", help="Enable regime filter (skip choppy markets)")
-    parser.add_argument("--chop-threshold", type=float, default=2.5, help="Chop threshold (higher = stricter)")
+    parser.add_argument(
+        "--regime-filter", action="store_true", help="Enable regime filter (skip choppy markets)"
+    )
+    parser.add_argument(
+        "--chop-threshold", type=float, default=2.5, help="Chop threshold (higher = stricter)"
+    )
 
     # Costs
-    parser.add_argument("--costs", type=float, default=0.0, help="Trading costs per trade in R (e.g., 0.04)")
+    parser.add_argument(
+        "--costs", type=float, default=0.0, help="Trading costs per trade in R (e.g., 0.04)"
+    )
 
     # Metrics (only used for labeling % of initial in R-based reporting)
     parser.add_argument("--initial-capital", type=float, default=10000.0)

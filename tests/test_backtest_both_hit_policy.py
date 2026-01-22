@@ -1,8 +1,9 @@
-import pandas as pd
 from dataclasses import dataclass
 
-from strategies.h2l2 import Side
+import pandas as pd
+
 from backtest.runner import _simulate_trade_outcome
+from strategies.h2l2 import Side
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,7 @@ def test_both_hit_same_bar_is_worst_case_loss_long():
     m5 = pd.DataFrame(
         {
             "high": [105.0],  # TP geraakt
-            "low": [95.0],    # SL geraakt
+            "low": [95.0],  # SL geraakt
             "open": [100.0],
             "close": [100.0],
         },
@@ -35,7 +36,7 @@ def test_both_hit_same_bar_is_worst_case_loss_short():
     m5 = pd.DataFrame(
         {
             "high": [105.0],  # SL geraakt (short)
-            "low": [95.0],    # TP geraakt
+            "low": [95.0],  # TP geraakt
             "open": [100.0],
             "close": [100.0],
         },

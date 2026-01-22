@@ -1,34 +1,96 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
 [project]
 name = "brooks"
 version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = [
-  "MetaTrader5",
-  "pandas",
-  "numpy",
-  "PyYAML",
-  "matplotlib",
-]
+description = "Al Brooks style trading framework"
+requires-python = ">=3.13"
+dependencies = []
 
-[project.optional-dependencies]
-dev = [
-  "pytest",
-  "pytest-cov",
-  "ruff",
-]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+# ---------------------------
+# Formatting (Black)
+# ---------------------------
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+skip-string-normalization = false
 
+
+# ---------------------------
+# Linting / fixing (Ruff)
+# ---------------------------
 [tool.ruff]
-line-length = 110
-target-version = "py310"
+line-length = 100
+target-version = "py313"
+fix = true
+
 exclude = [
-  ".venv",
-  "_export",
-  "_llm_export",
+    ".venv",
+    "venv",
+    "outputs",
+    "PNG",
+    "resultaat",
+    "logs",
+    "logs_test",
+    "backtest_png",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = [
+    "E", # pycodestyle errors
+    "F", # pyflakes
+    "I", # isort
+    "B", # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long (handled by Black)
+]
+
+# Per-file ignores for sys.path manipulation
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+"tests/*.py" = ["E402"]
+"**/test_*.py" = ["E402"]
+"examples/*.py" = ["E402"]
+"backtest/optimizer.py" = ["E402"]
+"backtest/runner.py" = ["E402"]
+"master_researcher_v3.py" = ["E402"]
+"quick_param_finder.py" = ["E402"]
+
+
+# ---------------------------
+# Import sorting (via Ruff)
+# ---------------------------
+[tool.ruff.lint.isort]
+known-first-party = ["brooks"]
+combine-as-imports = true
+
+
+# ---------------------------
+# Pytest
+# ---------------------------
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+
+# ---------------------------
+# Coverage
+# ---------------------------
+[tool.coverage.run]
+branch = true
+source = ["brooks"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

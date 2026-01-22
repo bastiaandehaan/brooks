@@ -1,6 +1,7 @@
 # tests/test_context.py
 import pandas as pd
-from strategies.context import infer_trend_m15, Trend, TrendParams
+
+from strategies.context import Trend, TrendParams, infer_trend_m15
 
 
 def _mk(closes):

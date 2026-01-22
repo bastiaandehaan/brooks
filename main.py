@@ -3,23 +3,25 @@
 Brooks MVP - WITH REGIME FILTER
 Only trade when market is TRENDING, skip CHOPPY days
 """
+
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
 
-import pandas as pd
 import MetaTrader5 as mt5
+import pandas as pd
 
 from execution.guardrails import Guardrails, apply_guardrails
-from strategies.context import Trend, TrendParams, infer_trend_m15
-from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
-from strategies.regime import MarketRegime, RegimeParams, should_trade_today
-from utils.mt5_client import Mt5Client
-from utils.mt5_data import fetch_rates, RatesRequest
 from execution.risk_manager import RiskManager
 from strategies.config import StrategyConfig
+from strategies.context import Trend, TrendParams, infer_trend_m15
+from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
+from strategies.regime import RegimeParams, should_trade_today
+from utils.mt5_client import Mt5Client
+from utils.mt5_data import RatesRequest, fetch_rates
+
 config = StrategyConfig.from_yaml("config/production.yaml")
 logger = logging.getLogger(__name__)
 
@@ -58,10 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-trades-day", type=int, default=2)
 
     # NEW: Regime Filter
-    p.add_argument("--regime-filter", action="store_true",
-                   help="Enable regime filter (skip choppy markets)")
-    p.add_argument("--chop-threshold", type=float, default=2.5,
-                   help="Range must be > (threshold × ATR) to trade")
+    p.add_argument(
+        "--regime-filter", action="store_true", help="Enable regime filter (skip choppy markets)"
+    )
+    p.add_argument(
+        "--chop-threshold",
+        type=float,
+        default=2.5,
+        help="Range must be > (threshold × ATR) to trade",
+    )
 
     return p
 
@@ -126,7 +133,10 @@ def main() -> int:
 
     logger.info(
         "Trend M15: %s (close=%.2f ema=%.2f slope=%.2f)",
-        trend_res, metrics.last_close, metrics.last_ema, metrics.ema_slope
+        trend_res,
+        metrics.last_close,
+        metrics.last_ema,
+        metrics.ema_slope,
     )
 
     if trend_res not in [Trend.BULL, Trend.BEAR]:
@@ -168,10 +178,7 @@ def main() -> int:
 
     rm = RiskManager(risk_per_trade_pct=args.risk_pct)
     lots = rm.calculate_lot_size(
-        balance=acc_info.balance,
-        spec=spec,
-        entry=planned_trade.entry,
-        stop=planned_trade.stop
+        balance=acc_info.balance, spec=spec, entry=planned_trade.entry, stop=planned_trade.stop
     )
 
     # 7. Guardrails

@@ -1,3 +1,4 @@
+
 # scripts/bundle_repo.py
 """
 Repository bundler (source-of-truth snapshot) — snapshot-grade, fail-fast, low-noise.
@@ -32,17 +33,16 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
-
 
 # --- bundle policy knobs ---
 MAX_FILE_BYTES = 2_000_000  # safety cap (prevents accidental huge dumps)
 FAIL_ON_REPLACEMENT = True  # fail if non-utf8 decode needed replacement
-FAIL_ON_TRUNCATION = True   # fail if any file exceeds MAX_FILE_BYTES
-FAIL_ON_EMPTY_PY = True     # fail if any .py/.pyi is empty (except __init__.py; unless allowlisted)
+FAIL_ON_TRUNCATION = True  # fail if any file exceeds MAX_FILE_BYTES
+FAIL_ON_EMPTY_PY = True  # fail if any .py/.pyi is empty (except __init__.py; unless allowlisted)
 
 
 # allowlist for intentionally-empty python files (keep tight)
@@ -62,7 +62,7 @@ def _rel(root: Path, p: Path) -> str:
 
 
 def _utc_now_z() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _sha256_bytes(b: bytes) -> str:
@@ -76,7 +76,11 @@ def find_repo_root(start: Path) -> Path:
     """
     cur = start.resolve()
     for _ in range(30):
-        if (cur / ".git").exists() or (cur / "requirements.txt").exists() or (cur / "pyproject.toml").exists():
+        if (
+            (cur / ".git").exists()
+            or (cur / "requirements.txt").exists()
+            or (cur / "pyproject.toml").exists()
+        ):
             return cur
         if cur.parent == cur:
             break
@@ -86,10 +90,23 @@ def find_repo_root(start: Path) -> Path:
 
 def should_exclude_dir(name: str) -> bool:
     excluded = {
-        ".git", ".venv", "venv", "__pycache__", ".idea",
-        ".pytest_cache", ".mypy_cache", ".ruff_cache",
-        "outputs", "logs", "log", "backtest_png",
-        "dist", "build", ".tox", ".nox", ".eggs",
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".idea",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "outputs",
+        "logs",
+        "log",
+        "backtest_png",
+        "dist",
+        "build",
+        ".tox",
+        ".nox",
+        ".eggs",
     }
     return name in excluded
 
@@ -126,10 +143,19 @@ def should_include_file(path: Path) -> bool:
         return False
 
     include_ext = {
-        ".py", ".pyi",
-        ".yaml", ".yml", ".toml", ".json", ".ini", ".cfg",
-        ".md", ".txt",
-        ".ps1", ".sh", ".bat",
+        ".py",
+        ".pyi",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".json",
+        ".ini",
+        ".cfg",
+        ".md",
+        ".txt",
+        ".ps1",
+        ".sh",
+        ".bat",
     }
 
     include_names = {
@@ -150,12 +176,21 @@ def should_include_file(path: Path) -> bool:
     }
 
     exclude_ext = {
-        ".png", ".jpg", ".jpeg", ".gif", ".webp",
-        ".zip", ".7z", ".rar",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".zip",
+        ".7z",
+        ".rar",
         ".pdf",
-        ".exe", ".dll",
-        ".pkl", ".pickle",
-        ".parquet", ".feather",
+        ".exe",
+        ".dll",
+        ".pkl",
+        ".pickle",
+        ".parquet",
+        ".feather",
     }
 
     if path.name in include_names:

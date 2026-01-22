@@ -1,29 +1,33 @@
-# tools/find_knobs_and_mismatches.py
+# Script: find_knobs_and_mismatches.py
+# Module: tools.find_knobs_and_mismatches
+# Location: tools/find_knobs_and_mismatches.py
+
 from __future__ import annotations
 
 import argparse
 import ast
 import json
 import os
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Tuple
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass
 class CliArg:
     file: str
     lineno: int
-    flags: List[str]
+    flags: list[str]
     dest: str | None
-    kwargs: Dict[str, Any]
+    kwargs: dict[str, Any]
 
 
 @dataclass
-class GetAttrUsage:
+class ArgsReadUsage:
     file: str
     lineno: int
     container: str
     attr_name: str
+    kind: str  # "getattr" | "attribute"
     default_value: Any
 
 
@@ -40,8 +44,8 @@ def _safe_literal(node: ast.AST) -> Any:
         return "<non-literal>"
 
 
-def _iter_py_files(root: str, exclude_dirs: Tuple[str, ...]) -> List[str]:
-    out: List[str] = []
+def _iter_py_files(root: str, exclude_dirs: tuple[str, ...]) -> list[str]:
+    out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
         for fn in filenames:
@@ -51,7 +55,7 @@ def _iter_py_files(root: str, exclude_dirs: Tuple[str, ...]) -> List[str]:
 
 
 def _read(fp: str) -> str:
-    with open(fp, "r", encoding="utf-8") as f:
+    with open(fp, encoding="utf-8") as f:
         return f.read()
 
 
@@ -63,14 +67,18 @@ def _relpath(path: str, root: str) -> str:
 
 
 class Visitor(ast.NodeVisitor):
-    def __init__(self, file_path: str, source: str):
+    def __init__(self, file_path: str):
         self.file_path = file_path
-        self.source = source
-        self.cli_args: List[CliArg] = []
-        self.getattrs: List[GetAttrUsage] = []
-        self._stack: List[str] = []
+        self.cli_args: list[CliArg] = []
+        self.args_reads: list[ArgsReadUsage] = []
+        self._stack: list[str] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self._stack.append(node.name)
+        self.generic_visit(node)
+        self._stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
         self._stack.append(node.name)
         self.generic_visit(node)
         self._stack.pop()
@@ -80,18 +88,22 @@ class Visitor(ast.NodeVisitor):
         self.generic_visit(node)
         self._stack.pop()
 
+    def _container(self) -> str:
+        return ".".join(self._stack) if self._stack else "<module>"
+
     def visit_Call(self, node: ast.Call) -> Any:
         # argparse: *.add_argument(...)
         if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
-            flags: List[str] = []
-            kwargs: Dict[str, Any] = {}
+            flags: list[str] = []
+            kwargs: dict[str, Any] = {}
+
             for a in node.args:
                 if isinstance(a, ast.Constant) and isinstance(a.value, str):
                     flags.append(a.value)
                 else:
                     flags.append(str(_safe_literal(a)))
 
-            dest = None
+            dest: str | None = None
             for kw in node.keywords:
                 if kw.arg is None:
                     continue
@@ -100,7 +112,7 @@ class Visitor(ast.NodeVisitor):
                 if kw.arg == "dest" and isinstance(val, str):
                     dest = val
 
-            # If no explicit dest, infer from longest flag like --ema-period -> ema_period
+            # Infer dest from last long flag (argparse behavior is more complex, but good enough)
             if dest is None:
                 long_flags = [f for f in flags if isinstance(f, str) and f.startswith("--")]
                 if long_flags:
@@ -123,21 +135,52 @@ class Visitor(ast.NodeVisitor):
                 name = node.args[1]
                 if isinstance(obj, ast.Name) and obj.id == "args":
                     if isinstance(name, ast.Constant) and isinstance(name.value, str):
-                        default = None
+                        default: Any = None
                         if len(node.args) >= 3:
                             default = _safe_literal(node.args[2])
-                        container = ".".join(self._stack) if self._stack else "<module>"
-                        self.getattrs.append(
-                            GetAttrUsage(
+                        self.args_reads.append(
+                            ArgsReadUsage(
                                 file=self.file_path,
                                 lineno=node.lineno,
-                                container=container,
+                                container=self._container(),
                                 attr_name=name.value,
+                                kind="getattr",
                                 default_value=default,
                             )
                         )
 
         self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> Any:
+        # args.foo usage
+        if isinstance(node.value, ast.Name) and node.value.id == "args":
+            self.args_reads.append(
+                ArgsReadUsage(
+                    file=self.file_path,
+                    lineno=node.lineno,
+                    container=self._container(),
+                    attr_name=node.attr,
+                    kind="attribute",
+                    default_value=None,
+                )
+            )
+        self.generic_visit(node)
+
+
+def _load_schema_fields(repo_root: str) -> set[str]:
+    """
+    Loads StrategyConfig fields if available. If import fails, returns empty set.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, repo_root)
+        from trading_framework.config.schema import StrategyConfig  # type: ignore
+
+        fields = set(StrategyConfig.model_fields.keys())
+        return fields
+    except Exception:
+        return set()
 
 
 def main() -> int:
@@ -146,7 +189,7 @@ def main() -> int:
     ap.add_argument("--json", default="knobs_and_mismatches.json")
     ap.add_argument(
         "--exclude",
-        default=".venv,.git,__pycache__,.pytest_cache,.mypy_cache,_export,_llm_export",
+        default=".venv,.git,__pycache__,.pytest_cache,.mypy_cache,_export,_llm_export,outputs,logs",
     )
     args = ap.parse_args()
 
@@ -155,65 +198,66 @@ def main() -> int:
 
     files = _iter_py_files(root, exclude_dirs)
 
-    all_cli: List[CliArg] = []
-    all_get: List[GetAttrUsage] = []
+    all_cli: list[CliArg] = []
+    all_reads: list[ArgsReadUsage] = []
 
     for fp in files:
         try:
             src = _read(fp)
             tree = ast.parse(src, filename=fp)
-            v = Visitor(_relpath(fp, root), src)
+            v = Visitor(_relpath(fp, root))
             v.visit(tree)
             all_cli.extend(v.cli_args)
-            all_get.extend(v.getattrs)
+            all_reads.extend(v.args_reads)
         except Exception:
             continue
 
     cli_dests = {c.dest for c in all_cli if c.dest}
-    get_names = {g.attr_name for g in all_get}
+    read_names = {r.attr_name for r in all_reads}
 
-    cli_not_read = sorted([d for d in cli_dests if d not in get_names])
-    read_not_cli = sorted([n for n in get_names if n not in cli_dests])
+    cli_not_read = sorted([d for d in cli_dests if d not in read_names])
+    read_not_cli = sorted([n for n in read_names if n not in cli_dests])
 
-    print("\n" + "=" * 100)
-    print("CLI DESTS FOUND")
-    print("=" * 100)
-    for d in sorted(cli_dests):
-        print(d)
-
-    print("\n" + "=" * 100)
-    print("ARGS READ VIA getattr(args, ...)")
-    print("=" * 100)
-    for n in sorted(get_names):
-        print(n)
-
-    print("\n" + "=" * 100)
-    print("MISMATCHES")
-    print("=" * 100)
-    print("CLI exists but never read (likely ignored / mapping bug):")
-    for d in cli_not_read:
-        print(f"  - {d}")
-
-    print("\nArgs read but no CLI flag provides them (only defaults / programmatic set):")
-    for n in read_not_cli:
-        print(f"  - {n}")
+    schema_fields = _load_schema_fields(root)
+    not_in_schema = sorted(
+        [n for n in (cli_dests | read_names) if schema_fields and n not in schema_fields]
+    )
+    schema_not_referenced = (
+        sorted([f for f in schema_fields if f not in (cli_dests | read_names)])
+        if schema_fields
+        else []
+    )
 
     report = {
         "root": root,
         "cli_args": [asdict(x) for x in all_cli],
-        "getattr_usages": [asdict(x) for x in all_get],
+        "args_reads": [asdict(x) for x in all_reads],
         "cli_dests": sorted(list(cli_dests)),
-        "getattr_names": sorted(list(get_names)),
+        "read_names": sorted(list(read_names)),
+        "schema_fields": sorted(list(schema_fields)),
         "mismatches": {
             "cli_exists_but_not_read": cli_not_read,
             "read_but_no_cli": read_not_cli,
+            "names_not_in_strategy_schema": not_in_schema,
+            "schema_fields_not_referenced_by_cli_or_args": schema_not_referenced,
         },
     }
 
     with open(args.json, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=str)
 
-    print(f"\nWrote: {args.json}")
+    print("\n" + "=" * 100)
+    print("MISMATCH SUMMARY")
+    print("=" * 100)
+    print(
+        f"CLI dests: {len(cli_dests)} | args reads: {len(read_names)} | schema fields: {len(schema_fields)}"
+    )
+    print(f"CLI exists but not read: {len(cli_not_read)}")
+    print(f"Read but no CLI: {len(read_not_cli)}")
+    print(f"Names not in StrategyConfig schema: {len(not_in_schema)}")
+    print(f"Schema fields not referenced by CLI/args: {len(schema_not_referenced)}")
+    print(f"\nWrote: {os.path.abspath(args.json)}")
+
     return 0
 
 
