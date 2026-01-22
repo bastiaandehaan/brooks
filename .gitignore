@@ -1,97 +1,77 @@
-# ============================================================
+# Brooks Trading Framework - Enhanced .gitignore
+
 # Python
-# ============================================================
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Unit test / coverage
-.pytest_cache/
-.coverage
-coverage.xml
-htmlcov/
-nosetests.xml
-test-results/
-
-# Type check / lint / format caches
-.mypy_cache/
-.pyre/
-.pytype/
-.ruff_cache/
-.cache/
-
-# Build / packaging
+*.so
+.Python
 build/
+develop-eggs/
 dist/
-*.egg-info/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 wheels/
-pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# Jupyter / IPython
-.ipynb_checkpoints/
-.profile_default/
-ipython_config.py
-
-# ============================================================
-# Virtual environments
-# ============================================================
-.venv/
+# Virtual Environments
 venv/
-env/
+.venv/
 ENV/
+env/
 
-# ============================================================
-# Logs / runtime artifacts
-# ============================================================
-*.log
-logs/
-*.sqlite3
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# ============================================================
-# OS junk
-# ============================================================
+# OS
 .DS_Store
 Thumbs.db
-ehthumbs.db
-Desktop.ini
 
-# ============================================================
-# IDE / editors
-# ============================================================
-.idea/
-*.iml
-.vscode/
-*.code-workspace
-
-# ============================================================
-# Secrets (NEVER COMMIT!)
-# ============================================================
-.env
-.env.local
-.env.*.local
-
-# ============================================================
-# Project-specific generated outputs
-# ============================================================
+# Trading Framework Outputs (CRITICAL - must not be in git)
+backtest_png/
 backtest_report_*.png
-optimal_config.json
-trade_log_*.json
-daily_stats_*.json
+*_report.png
+*_equity.png
+logs/
+*.log
+results/
+*.db
+*.sqlite
+*.sqlite3
 
-# ============================================================
-# LLM / export helpers (avoid export-in-export recursion!)
-# ============================================================
-_export/
-_llm_export/
-llm_dump.txt
-llm_bundle.zip
-pyfiles.txt
-all_code_dump.txt
+# Optimizer & Backtest Results
+optimization_results.csv
+optimal_config_*.json
+backtest_results_*.json
 
-*.prof
-
+# Repository Bundles (development only)
 full_repository_bundle.txt
-backtest/optimization_results.csv
-knobs_and_mismatches.json
-logs_test/
+*_bundle.txt
+
+# MT5 Data Cache (if any)
+.mt5_cache/
+
+# Emergency Stop File
+STOP.txt
+
+# Temporary Files
+*.tmp
+*.temp
+.temp/

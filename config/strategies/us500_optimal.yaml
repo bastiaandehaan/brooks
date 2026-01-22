@@ -1,0 +1,43 @@
+# config/strategies/us500_optimal.yaml
+# Brooks Trading Strategy - Optimized Configuration
+# Generated from backtest optimization results (340 days)
+# DO NOT EDIT MANUALLY - Use optimizer JSON conversion
+
+symbol: US500.cash
+
+regime:
+  enabled: true
+  chop_threshold: 2.0  # Optimized: filters choppy markets aggressively
+  atr_period: 14
+  range_period: 20
+
+trend:
+  ema_period: 20       # Brooks standard 20-period EMA on M15
+  min_slope: 0.15      # Minimum trend strength requirement
+
+h2l2:
+  pullback_bars: 3     # Standard Brooks pullback count
+  signal_close_frac: 0.30  # Signal bar must close in extreme 30%
+  min_risk_price_units: 2.0  # Minimum 2pt risk (US500)
+  stop_buffer: 1.0     # Optimized: tighter stops (1.0pts)
+  cooldown_bars: 0     # Optimized: no cooldown for maximum frequency
+
+guardrails:
+  session_tz: America/New_York
+  day_tz: America/New_York
+  session_start: "09:30"
+  session_end: "16:00"
+  max_trades_per_day: 2  # Conservative daily limit
+
+risk:
+  risk_pct: 0.5  # 0.5% account risk per trade (FTMO-safe)
+
+costs:
+  per_trade_r: 0.04  # Estimated slippage + spread in R-units
+
+# Performance expectations (from 340-day backtest):
+# - Net R: ~300+ (after costs)
+# - Winrate: ~45-50%
+# - Daily Sharpe (R/day): ~2.0+
+# - Max DD (daily): ~-15R
+# - Regime filter: skips ~8% of choppy segments

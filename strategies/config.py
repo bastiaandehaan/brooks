@@ -1,70 +1,85 @@
 # strategies/config.py
 """
-Shared strategy configuration
-Ensures main.py and backtest/runner.py use EXACT same parameters
-to prevent parameter drift between simulation and live execution.
+SINGLE SOURCE OF TRUTH for Strategy Configuration
+Zero-drift guarantee between backtest and live execution.
+
+Features:
+- YAML/JSON loading with automatic format detection
+- Key aliasing (max_trades_day vs max_trades_per_day)
+- Config hash logging for audit trail
+- Validation with clear error messages
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import yaml
 
 from execution.guardrails import Guardrails
-
-# Importeren van parameter classes uit de bestaande strategie pakketten.
-# Dit garandeert dat de config direct mapt op de logica in de strategies map.
 from strategies.context import TrendParams
 from strategies.h2l2 import H2L2Params
 from strategies.regime import RegimeParams
 
 logger = logging.getLogger(__name__)
 
+# Key aliases for backwards compatibility and common naming variations
+KEY_ALIASES = {
+    "max_trades_day": "max_trades_per_day",
+    "max_trades_per_day": "max_trades_per_day",
+    "ema": "ema_period",
+    "min_risk": "min_risk_price_units",
+    "cooldown": "cooldown_bars",
+    "costs": "costs_per_trade_r",
+    "per_trade_r": "costs_per_trade_r",
+}
+
+
+def _normalize_keys(data: Dict[str, Any], aliases: Dict[str, str]) -> Dict[str, Any]:
+    """Apply key aliasing to dict (non-recursive for top-level keys)"""
+    normalized = {}
+    for key, value in data.items():
+        canonical_key = aliases.get(key, key)
+        normalized[canonical_key] = value
+    return normalized
+
 
 @dataclass(frozen=True)
 class StrategyConfig:
     """
-    Complete strategy configuration.
-    Used by BOTH live and backtest environments to prevent drift.
-    Acts as the Single Source of Truth for the trading session.
+    Complete strategy configuration - Single Source of Truth
+    Used by BOTH backtest and live to prevent parameter drift
     """
 
-    # Instrument Symbol (bv. US500.cash)
+    # Instrument
     symbol: str = "US500.cash"
 
-    # Regime Filter Configuratie
-    # Bepaalt of we filteren op choppy markten
+    # Regime Filter
     regime_filter: bool = True
     regime_params: RegimeParams = None
 
-    # Trend Context Configuratie
-    # Instellingen voor EMA periode en slope detectie
+    # Trend Context
     trend_params: TrendParams = None
 
-    # H2/L2 Strategie Configuratie
-    # Parameters voor pullback detectie en signal bars
+    # H2/L2 Strategy
     h2l2_params: H2L2Params = None
 
     # Execution Guardrails
-    # Tijdfilters en dagelijkse limieten
     guardrails: Guardrails = None
 
     # Risk Management
-    # Percentage van account balans per trade
     risk_pct: float = 1.0
 
-    # Transactiekosten (voornamelijk voor backtesting simulatie)
-    # Uitgedrukt in R-units om consistentie te bewaren
+    # Transaction Costs (R-units for consistency)
     costs_per_trade_r: float = 0.04
 
     def __post_init__(self):
-        """
-        Initialize default sub-configs if they were not provided during instantiation.
-        This ensures the object is always fully populated and ready for use.
-        Because the dataclass is frozen, we must use object.__setattr__.
-        """
+        """Initialize default sub-configs if not provided"""
         if self.regime_params is None:
             object.__setattr__(self, "regime_params", RegimeParams())
         if self.trend_params is None:
@@ -75,69 +90,94 @@ class StrategyConfig:
             object.__setattr__(self, "guardrails", Guardrails())
 
     @classmethod
-    def from_args(cls, args) -> StrategyConfig:
+    def load(cls, filepath: str) -> "StrategyConfig":
         """
-        Create config from CLI arguments.
-        This provides backward compatibility for main.py and backtest/runner.py
-        which currently rely on argparse. It maps the flat argument structure
-        to the hierarchical config structure.
+        MAIN LOADER - Auto-detects YAML or JSON and loads config.
+        Logs config hash for audit trail.
+
+        Usage:
+            config = StrategyConfig.load("config/strategies/us500_optimal.yaml")
         """
-        return cls(
-            symbol=getattr(args, "symbol", "US500.cash"),
-            regime_filter=getattr(args, "regime_filter", False),
-            regime_params=RegimeParams(
-                chop_threshold=getattr(args, "chop_threshold", 2.5),
-            ),
-            trend_params=TrendParams(
-                ema_period=getattr(args, "ema", 20),
-                min_slope=getattr(args, "min_slope", 0.15),
-            ),
-            h2l2_params=H2L2Params(
-                pullback_bars=getattr(args, "pullback_bars", 3),
-                signal_close_frac=getattr(args, "signal_close_frac", 0.30),
-                min_risk_price_units=getattr(args, "min_risk", 2.0),
-                stop_buffer=getattr(args, "stop_buffer", 1.0),
-                cooldown_bars=getattr(args, "cooldown", 0),
-            ),
-            guardrails=Guardrails(
-                session_tz=getattr(args, "session_tz", "America/New_York"),
-                day_tz=getattr(args, "day_tz", "America/New_York"),
-                session_start=getattr(args, "session_start", "09:30"),
-                session_end=getattr(args, "session_end", "16:00"),
-                max_trades_per_day=getattr(args, "max_trades_day", 2),
-            ),
-            risk_pct=getattr(args, "risk_pct", 1.0),
-            costs_per_trade_r=getattr(args, "costs", 0.04),
-        )
+        path = Path(filepath)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {filepath}")
+
+        # Read raw content for hash
+        raw_content = path.read_text(encoding="utf-8")
+        config_hash = hashlib.sha256(raw_content.encode()).hexdigest()[:12]
+
+        # Auto-detect format
+        suffix = path.suffix.lower()
+        if suffix in [".yaml", ".yml"]:
+            config = cls.from_yaml(filepath)
+        elif suffix == ".json":
+            config = cls.from_json(filepath)
+        else:
+            raise ValueError(f"Unsupported config format: {suffix}. Use .yaml or .json")
+
+        logger.info("=" * 80)
+        logger.info("📋 LOADED STRATEGY CONFIG")
+        logger.info("=" * 80)
+        logger.info(f"  File: {filepath}")
+        logger.info(f"  Hash: {config_hash}")
+        logger.info(f"  Symbol: {config.symbol}")
+        logger.info(f"  Regime Filter: {config.regime_filter}")
+        if config.regime_filter:
+            logger.info(f"  Chop Threshold: {config.regime_params.chop_threshold}")
+        logger.info(f"  Risk per Trade: {config.risk_pct}%")
+        logger.info(f"  Max Trades/Day: {config.guardrails.max_trades_per_day}")
+        logger.info("=" * 80)
+
+        # Validate
+        valid, error = config.validate()
+        if not valid:
+            raise ValueError(f"Config validation failed: {error}")
+
+        return config
 
     @classmethod
-    def from_yaml(cls, filepath: str) -> StrategyConfig:
-        """
-        Load configuration from a YAML file.
-        This is the preferred method for production deployment, ensuring
-        reproducibility and separation of concerns.
-        """
+    def from_yaml(cls, filepath: str) -> "StrategyConfig":
+        """Load from YAML file with alias support"""
         try:
-            with open(filepath) as f:
+            with open(filepath, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
         except Exception as e:
-            logger.error(f"Failed to load YAML config from {filepath}: {e}")
+            logger.error(f"Failed to load YAML from {filepath}: {e}")
             raise
 
-        # Extract subsections with defaults if missing
-        # This robustness prevents crashes on partial config files
-        regime_data = data.get("regime", {})
-        trend_data = data.get("trend", {})
-        h2l2_data = data.get("h2l2", {})
-        guard_data = data.get("guardrails", {})
-        risk_data = data.get("risk", {})
-        costs_data = data.get("costs", {})
+        return cls._from_dict(data)
+
+    @classmethod
+    def from_json(cls, filepath: str) -> "StrategyConfig":
+        """Load from JSON file with alias support"""
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load JSON from {filepath}: {e}")
+            raise
+
+        return cls._from_dict(data)
+
+    @classmethod
+    def _from_dict(cls, data: Dict[str, Any]) -> "StrategyConfig":
+        """Internal: construct from normalized dict"""
+        # Extract and normalize subsections
+        regime_data = _normalize_keys(data.get("regime", {}), KEY_ALIASES)
+        trend_data = _normalize_keys(data.get("trend", {}), KEY_ALIASES)
+        h2l2_data = _normalize_keys(data.get("h2l2", {}), KEY_ALIASES)
+        guard_data = _normalize_keys(data.get("guardrails", {}), KEY_ALIASES)
+        risk_data = _normalize_keys(data.get("risk", {}), KEY_ALIASES)
+        costs_data = _normalize_keys(data.get("costs", {}), KEY_ALIASES)
 
         return cls(
             symbol=data.get("symbol", "US500.cash"),
             regime_filter=regime_data.get("enabled", False),
             regime_params=RegimeParams(
                 chop_threshold=regime_data.get("chop_threshold", 2.5),
+                atr_period=regime_data.get("atr_period", 14),
+                range_period=regime_data.get("range_period", 20),
             ),
             trend_params=TrendParams(
                 ema_period=trend_data.get("ema_period", 20),
@@ -155,23 +195,21 @@ class StrategyConfig:
                 day_tz=guard_data.get("day_tz", "America/New_York"),
                 session_start=guard_data.get("session_start", "09:30"),
                 session_end=guard_data.get("session_end", "16:00"),
-                max_trades_per_day=guard_data.get("max_trades_day", 2),
+                max_trades_per_day=guard_data.get("max_trades_per_day", 2),
             ),
             risk_pct=risk_data.get("risk_pct", 1.0),
-            costs_per_trade_r=costs_data.get("per_trade_r", 0.04),
+            costs_per_trade_r=costs_data.get("costs_per_trade_r", 0.04),
         )
 
     def to_yaml(self, filepath: str) -> None:
-        """
-        Save the current configuration state to a YAML file.
-        Useful for exporting the exact config used during a live session
-        for audit purposes.
-        """
+        """Save config to YAML (for exporting live config)"""
         data = {
             "symbol": self.symbol,
             "regime": {
                 "enabled": self.regime_filter,
                 "chop_threshold": self.regime_params.chop_threshold,
+                "atr_period": self.regime_params.atr_period,
+                "range_period": self.regime_params.range_period,
             },
             "trend": {
                 "ema_period": self.trend_params.ema_period,
@@ -189,7 +227,7 @@ class StrategyConfig:
                 "day_tz": self.guardrails.day_tz,
                 "session_start": self.guardrails.session_start,
                 "session_end": self.guardrails.session_end,
-                "max_trades_day": self.guardrails.max_trades_per_day,
+                "max_trades_per_day": self.guardrails.max_trades_per_day,
             },
             "risk": {
                 "risk_pct": self.risk_pct,
@@ -199,24 +237,19 @@ class StrategyConfig:
             },
         }
 
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-    def validate(self) -> tuple[bool, str | None]:
-        """
-        Validate configuration parameters against logical constraints.
-        This serves as a 'Pre-Flight Check' before trading starts.
-        Returns: (is_valid, error_message)
-        """
-        # Validatie van Regime Parameters
+        logger.info(f"Config saved to {filepath}")
+
+    def validate(self) -> tuple[bool, Optional[str]]:
+        """Pre-flight validation"""
         if self.regime_params.chop_threshold < 0:
             return False, "chop_threshold must be >= 0"
 
-        # Validatie van Trend Parameters
         if self.trend_params.ema_period < 2:
             return False, "ema_period must be >= 2"
 
-        # Validatie van H2L2 Parameters
         if self.h2l2_params.pullback_bars < 1:
             return False, "pullback_bars must be >= 1"
 
@@ -226,12 +259,29 @@ class StrategyConfig:
         if self.h2l2_params.stop_buffer < 0:
             return False, "stop_buffer must be >= 0"
 
-        # Validatie van Risico Management
         if self.risk_pct <= 0 or self.risk_pct > 10:
-            return False, "risk_pct must be between 0 and 10 (reasonable range for FTMO)"
+            return False, "risk_pct must be between 0 and 10"
 
-        # Validatie van Guardrails
         if self.guardrails.max_trades_per_day < 1:
             return False, "max_trades_per_day must be >= 1"
 
         return True, None
+
+    def get_hash(self) -> str:
+        """Get reproducible hash of config for audit trail"""
+        # Convert to dict and sort keys for deterministic hash
+        data_dict = {
+            "symbol": self.symbol,
+            "regime_filter": self.regime_filter,
+            "regime_chop": self.regime_params.chop_threshold,
+            "trend_ema": self.trend_params.ema_period,
+            "trend_slope": self.trend_params.min_slope,
+            "h2l2_pullback": self.h2l2_params.pullback_bars,
+            "h2l2_frac": self.h2l2_params.signal_close_frac,
+            "h2l2_stop_buffer": self.h2l2_params.stop_buffer,
+            "h2l2_cooldown": self.h2l2_params.cooldown_bars,
+            "risk_pct": self.risk_pct,
+            "max_trades_day": self.guardrails.max_trades_per_day,
+        }
+        json_str = json.dumps(data_dict, sort_keys=True)
+        return hashlib.sha256(json_str.encode()).hexdigest()[:12]
