@@ -1,0 +1,46 @@
+# Brooks Sniper Strategy - Quality over Quantity
+# Optimized for FTMO challenge compliance
+# 340-day backtest: +69.88R, Sharpe 1.806, MaxDD -13.32R
+
+symbol: US500.cash
+
+regime:
+  enabled: true
+  chop_threshold: 3.0  # Strict: skip choppy markets aggressively
+  atr_period: 14
+  range_period: 20
+
+trend:
+  ema_period: 15       # Faster response to trend changes
+  min_slope: 0.10      # Lower threshold for trend detection
+
+h2l2:
+  pullback_bars: 3
+  signal_close_frac: 0.35  # Stronger rejection requirement (vs 0.30)
+  min_risk_price_units: 2.5  # Larger stops for breathing room
+  stop_buffer: 1.0
+  cooldown_bars: 20    # Avoid overtrading same trend segment
+
+guardrails:
+  session_tz: America/New_York
+  day_tz: America/New_York
+  session_start: "09:30"
+  session_end: "16:00"
+  max_trades_per_day: 1  # SNIPER: only best setup per day
+
+risk:
+  risk_pct: 1.0  # Can reduce to 0.5% for FTMO challenge
+
+costs:
+  per_trade_r: 0.04
+
+# Performance Expectations (340-day backtest):
+# - Net R: +69.88R (after costs)
+# - Daily Sharpe: 1.806
+# - Daily Sortino: 28.453
+# - Max DD: -13.32R (-0.133% of 10k account)
+# - Recovery Factor: 5.25
+# - MAR Ratio: 3.89
+# - Winrate: 41.77%
+# - Avg R/trade: +0.2130R
+# - Annual R est: +51.79R
