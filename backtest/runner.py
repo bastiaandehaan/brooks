@@ -1,11 +1,16 @@
-# backtest/runner.py
+# Script: runner.py
+# Module: backtest.runner
+# Location: backtest/runner.py
 """
-Brooks Backtest Runner - WITH REGIME FILTER & COSTS & R-BASED DAILY METRICS
+BROOKS BACKTEST RUNNER (US500.cash)
 
-Strategy is unchanged. Only reporting/metrics:
-- Real exit timestamps from simulation (no +2h placeholder)
-- Daily metrics computed on daily PnL in R-units (option 1)
-- PNG dashboard saved to backtest/backtest_png via visualiser
+Audit controls (optional):
+- --strict-m15-close: shift M15-derived features (trend/regime) to become available at M15 bar close (ts + 15min)
+  before aligning onto M5. This removes a common MTF lookahead leak when MT5 timestamps represent bar open.
+- --strict-entry-bar: do NOT allow TP/SL hits on the entry bar (simulation starts from the first M5 bar strictly AFTER
+  execute_ts). This removes intrabar lookahead in bar-based backtests.
+
+This file is designed to be a drop-in replacement that matches your existing CLI flags and your current framework API.
 """
 
 from __future__ import annotations
@@ -16,42 +21,60 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable, Tuple
 
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
 
+# Repo root
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.insert(0, root_dir)
 
+from backtest.visualiser import generate_performance_report
 from execution.guardrails import Guardrails, apply_guardrails
-from strategies.config import StrategyConfig
+from execution.selection import select_top_per_ny_day
 from strategies.context import Trend, TrendParams, infer_trend_m15_series
 from strategies.h2l2 import H2L2Params, PlannedTrade, Side, plan_h2l2_trades
 from strategies.regime import MarketRegime, RegimeParams, detect_regime_series
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import RatesRequest, fetch_rates
 
-# Keep config load (even if currently unused) to ensure production.yaml validity in CI.
-config = StrategyConfig.from_yaml("config/production.yaml")
-
-# Suppress guardrail/selection spam logging
-import logging as _log
-
-_log.getLogger("execution.guardrails").setLevel(_log.WARNING)
-
-from execution.selection import select_top_per_ny_day
-
-_log.getLogger("execution.selection").setLevel(_log.WARNING)
-
-from backtest.visualiser import generate_performance_report
-
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("Backtest")
 
 NY_TZ = "America/New_York"
+
+
+# ----------------------------
+# Helpers: robust field access
+# ----------------------------
+def _get_trade_entry(t: PlannedTrade) -> float:
+    for k in ("entry", "entry_price"):
+        if hasattr(t, k):
+            return float(getattr(t, k))
+    raise AttributeError("PlannedTrade missing entry field (entry/entry_price).")
+
+
+def _get_trade_stop(t: PlannedTrade) -> float:
+    for k in ("stop", "stop_price"):
+        if hasattr(t, k):
+            return float(getattr(t, k))
+    raise AttributeError("PlannedTrade missing stop field (stop/stop_price).")
+
+
+def _get_trade_target(t: PlannedTrade) -> float:
+    for k in ("tp", "target", "target_price"):
+        if hasattr(t, k):
+            return float(getattr(t, k))
+    raise AttributeError("PlannedTrade missing target field (tp/target/target_price).")
+
+
+def _get_trade_ts(t: PlannedTrade) -> pd.Timestamp:
+    if hasattr(t, "execute_ts"):
+        return pd.to_datetime(getattr(t, "execute_ts"))
+    raise AttributeError("PlannedTrade missing execute_ts.")
 
 
 def _normalize_ohlc(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
@@ -64,16 +87,7 @@ def _normalize_ohlc(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
     return out
 
 
-def precalculate_trends(m15_df: pd.DataFrame, params: TrendParams) -> pd.DataFrame:
-    logger.info("→ Calculating trends (vectorized)...")
-    t0 = time.perf_counter()
-    trend_series = infer_trend_m15_series(m15_df, params)
-    out = pd.DataFrame({"trend": trend_series}, index=m15_df.index)
-    logger.info("  Trend calc: %.2fs", time.perf_counter() - t0)
-    return out
-
-
-def _trend_to_side(trend: Trend) -> Side | None:
+def _trend_to_side(trend: Any) -> Side | None:
     if trend == Trend.BULL:
         return Side.LONG
     if trend == Trend.BEAR:
@@ -81,390 +95,365 @@ def _trend_to_side(trend: Trend) -> Side | None:
     return None
 
 
-def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> tuple[float, pd.Timestamp]:
+def _safe_unpack_regime(output: Any) -> Tuple[pd.Series, pd.Series | None]:
     """
-    Simulate trade outcome with worst-case both-hit policy.
-    Returns (R-value BEFORE costs, exit_ts).
-
-    If no hit, exit_ts is last available bar time.
+    Your detect_regime_series may return:
+      - Series (regime)
+      - tuple(regime_series, chop_ratio_series)
+    We normalize into (regime_series, chop_ratio_series_or_None).
     """
-    future = m5_data.loc[t.execute_ts :]
-    last_ts = pd.to_datetime(future.index[-1]) if len(future) else pd.to_datetime(t.execute_ts)
+    if isinstance(output, tuple) and len(output) >= 2:
+        reg = output[0]
+        chop = output[1]
+        return pd.Series(reg, index=getattr(reg, "index", None)), pd.Series(
+            chop, index=getattr(chop, "index", None)
+        )
+    # Series-only
+    reg = pd.Series(output)
+    return reg, None
 
-    for ts, bar in future.iterrows():
-        high = float(bar["high"])
-        low = float(bar["low"])
-        ts = pd.to_datetime(ts)
+
+def _merge_m15_features_to_m5(
+    m5: pd.DataFrame,
+    m15_features: pd.DataFrame,
+    *,
+    strict_m15_close: bool,
+    m15_bar_minutes: int = 15,
+) -> pd.DataFrame:
+    """
+    Align M15 features onto M5 bars using merge_asof(backward).
+    If strict_m15_close=True, shift M15 feature timestamps by +15 minutes to represent availability at bar close.
+    """
+    m5_ts = m5.reset_index().rename(columns={"index": "ts"})
+    m5_ts["ts"] = pd.to_datetime(m5_ts["ts"])
+
+    m15_ts = m15_features.reset_index().rename(columns={"index": "ts"})
+    m15_ts["ts"] = pd.to_datetime(m15_ts["ts"])
+
+    if strict_m15_close:
+        m15_ts["ts_available"] = m15_ts["ts"] + pd.Timedelta(minutes=m15_bar_minutes)
+        right_on = "ts_available"
+        m15_sort_col = "ts_available"
+    else:
+        right_on = "ts"
+        m15_sort_col = "ts"
+
+    merged = pd.merge_asof(
+        m5_ts.sort_values("ts"),
+        m15_ts.sort_values(m15_sort_col),
+        left_on="ts",
+        right_on=right_on,
+        direction="backward",
+    )
+
+    merged = merged.set_index("ts")
+    # Restore original M5 columns + appended feature columns
+    for col in m5.columns:
+        if col not in merged.columns:
+            merged[col] = m5[col].values
+    merged = merged[m5.columns.tolist() + [c for c in merged.columns if c not in m5.columns]]
+    return merged
+
+
+def _slice_future_bars(
+    m5_data: pd.DataFrame, exec_ts: pd.Timestamp, *, strict_entry_bar: bool
+) -> pd.DataFrame:
+    """
+    strict_entry_bar=True -> start strictly AFTER exec_ts (exclude entry bar).
+    strict_entry_bar=False -> include entry bar (legacy).
+    """
+    if m5_data.empty:
+        return m5_data
+    idx = m5_data.index
+    ts = pd.to_datetime(exec_ts)
+    pos = idx.searchsorted(ts, side="right" if strict_entry_bar else "left")
+    if pos >= len(m5_data):
+        return m5_data.iloc[0:0]
+    return m5_data.iloc[pos:]
+
+
+def _simulate_trade_outcome(
+    m5_data: pd.DataFrame,
+    t: PlannedTrade,
+    *,
+    strict_entry_bar: bool,
+) -> tuple[float, pd.Timestamp]:
+    """
+    Worst-case both-hit policy.
+    Returns (raw_r, exit_ts) BEFORE costs.
+
+    Uses fixed payoff convention consistent with your outputs:
+      win: +2R, loss: -1R, no hit by end: 0R.
+    """
+    exec_ts = _get_trade_ts(t)
+    entry = _get_trade_entry(t)
+    stop = _get_trade_stop(t)
+    target = _get_trade_target(t)
+
+    future = _slice_future_bars(m5_data, exec_ts, strict_entry_bar=strict_entry_bar)
+    if future.empty:
+        return 0.0, exec_ts
+
+    last_ts = pd.to_datetime(future.index[-1])
+
+    for ts, row in future.iterrows():
+        high = float(row["high"])
+        low = float(row["low"])
 
         if t.side == Side.LONG:
-            hit_sl = low <= t.stop
-            hit_tp = high >= t.tp
-            if hit_sl and hit_tp:
-                return -1.0, ts
-            if hit_sl:
-                return -1.0, ts
-            if hit_tp:
-                return 2.0, ts
-        else:
-            hit_sl = high >= t.stop
-            hit_tp = low <= t.tp
-            if hit_sl and hit_tp:
-                return -1.0, ts
-            if hit_sl:
-                return -1.0, ts
-            if hit_tp:
-                return 2.0, ts
+            stop_hit = low <= stop
+            target_hit = high >= target
+            if stop_hit and target_hit:
+                return -1.0, pd.to_datetime(ts)  # worst-case
+            if stop_hit:
+                return -1.0, pd.to_datetime(ts)
+            if target_hit:
+                return 2.0, pd.to_datetime(ts)
+
+        else:  # SHORT
+            stop_hit = high >= stop
+            target_hit = low <= target
+            if stop_hit and target_hit:
+                return -1.0, pd.to_datetime(ts)  # worst-case
+            if stop_hit:
+                return -1.0, pd.to_datetime(ts)
+            if target_hit:
+                return 2.0, pd.to_datetime(ts)
 
     return 0.0, last_ts
 
 
-def _apply_costs(result_r: float, costs_r: float) -> float:
-    return result_r - costs_r
+def _apply_costs(raw_r: float, costs_per_trade_r: float) -> float:
+    return float(raw_r) - float(costs_per_trade_r)
 
 
-def _build_trades_dataframe(
-    final_trades: list[PlannedTrade],
-    results_r: list[float],
-    exit_ts_list: list[pd.Timestamp],
-    *,
-    m5_data: pd.DataFrame,
-    ny_tz: str,
-) -> pd.DataFrame:
-    rows = []
-    for trade, result, exit_ts in zip(final_trades, results_r, exit_ts_list):
-        entry_ts = pd.to_datetime(trade.execute_ts)
-        exit_ts = pd.to_datetime(exit_ts)
-
-        regime_val = None
-        chop_ratio = None
-        try:
-            row = m5_data.loc[trade.execute_ts]
-            if isinstance(row, pd.DataFrame):
-                row = row.iloc[0]
-            regime_val = row.get("regime", None)
-            chop_ratio = row.get("chop_ratio", None)
-        except Exception:
-            pass
-
-        rows.append(
-            {
-                "entry_time": entry_ts,
-                "exit_time": exit_ts,
-                "side": trade.side.value,
-                "entry": float(trade.entry),
-                "stop": float(trade.stop),
-                "tp": float(trade.tp),
-                "net_r": float(result),
-                "reason": str(trade.reason),
-                "regime_at_entry": str(regime_val) if regime_val is not None else None,
-                "chop_ratio_at_entry": float(chop_ratio) if chop_ratio is not None else None,
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    df["entry_time"] = pd.to_datetime(df["entry_time"])
-    df["exit_time"] = pd.to_datetime(df["exit_time"])
-    df = df.sort_values("entry_time").reset_index(drop=True)
-
-    # Group by NY calendar day using exit_time.
-    # Assumption: naive timestamps are UTC (MT5 Python API times are typically UTC).
-    if df["exit_time"].dt.tz is None:
-        df["ny_day"] = df["exit_time"].dt.tz_localize("UTC").dt.tz_convert(ny_tz).dt.date
-    else:
-        df["ny_day"] = df["exit_time"].dt.tz_convert(ny_tz).dt.date
-
-    return df
-
-
-def _max_consecutive_losses(trade_pnl: list[float]) -> int:
-    max_run = 0
-    run = 0
-    for r in trade_pnl:
-        if r < 0:
-            run += 1
-            max_run = max(max_run, run)
-        else:
-            run = 0
-    return int(max_run)
-
-
-def _daily_series_from_trades(
-    trades_df: pd.DataFrame,
-    *,
-    start_dt: pd.Timestamp | None,
-    end_dt: pd.Timestamp | None,
-    ny_tz: str,
-) -> pd.Series:
-    """
-    Daily PnL in R units indexed by NY calendar day (date objects).
-    Ensures all calendar days in [start, end] exist (0R on no-trade days).
-    """
-    if trades_df.empty:
-        return pd.Series(dtype="float64")
-
-    daily = trades_df.groupby("ny_day")["net_r"].sum().astype("float64")
-
-    if start_dt is not None and end_dt is not None:
-        s = pd.to_datetime(start_dt)
-        e = pd.to_datetime(end_dt)
-
-        # interpret naive timestamps as UTC then convert to NY for day range
-        if s.tzinfo is None:
-            s = s.tz_localize("UTC").tz_convert(ny_tz)
-        else:
-            s = s.tz_convert(ny_tz)
-
-        if e.tzinfo is None:
-            e = e.tz_localize("UTC").tz_convert(ny_tz)
-        else:
-            e = e.tz_convert(ny_tz)
-
-        full_days = pd.date_range(s.date(), e.date(), freq="D").date
-        daily = daily.reindex(full_days, fill_value=0.0)
-
-    return daily
-
-
-def _compute_manager_metrics_r_based(
-    trades_df: pd.DataFrame,
-    *,
-    daily_pnl_r: pd.Series,  # R per NY-day
-    trading_days_per_year: int,
-    initial_capital: float,  # only for "% of initial" reporting
-) -> dict[str, Any]:
-    """
-    Option 1: all daily risk/return metrics computed on daily PnL in R-units (no pct_change).
-    """
-    out: dict[str, Any] = {}
-    if daily_pnl_r.empty:
-        return out
-
-    dp = pd.Series(daily_pnl_r, dtype="float64").replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    mu = float(dp.mean())
-    sig = float(dp.std(ddof=1)) if len(dp) > 1 else 0.0
-    daily_sharpe_r = (mu / sig) * np.sqrt(trading_days_per_year) if sig > 0 else 0.0
-
-    downside = dp[dp < 0]
-    dsig = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
-    daily_sortino_r = (mu / dsig) * np.sqrt(trading_days_per_year) if dsig > 0 else 0.0
-
-    # Daily equity in R-units
-    eq_r = dp.cumsum()
-    run_max = eq_r.cummax()
-    dd_r = eq_r - run_max
-    max_dd_r_daily = float(dd_r.min())
-
-    # Explicitly: percent of initial capital (NOT a portfolio return)
-    max_dd_pct_initial = (max_dd_r_daily / initial_capital) * 100.0 if initial_capital else 0.0
-
-    best_day_r = float(dp.max())
-    worst_day_r = float(dp.min())
-
-    var_95_r = float(np.nanpercentile(dp.values, 5)) if len(dp) else 0.0
-    cvar_95_r = float(dp[dp <= var_95_r].mean()) if len(dp) else 0.0
-
-    skew_r = float(dp.skew()) if len(dp) > 2 else 0.0
-    kurtosis_r = float(dp.kurtosis()) if len(dp) > 3 else 0.0
-
-    pct_pos_days = float((dp > 0).mean() * 100.0) if len(dp) else 0.0
-
-    underwater = dd_r < 0
-    max_underwater_days = 0
-    run = 0
-    for v in underwater.astype(int).values:
-        if v == 1:
-            run += 1
-            max_underwater_days = max(max_underwater_days, run)
-        else:
-            run = 0
-
-    total_calendar_days = int(len(dp))
-    days_with_trades = int((dp != 0).sum())
-    trades_total = int(len(trades_df))
-    trades_per_active_day = (trades_total / days_with_trades) if days_with_trades else 0.0
-    trades_per_calendar_day = (trades_total / total_calendar_days) if total_calendar_days else 0.0
-
-    out.update(
-        {
-            "daily_sharpe_r": daily_sharpe_r,
-            "daily_sortino_r": daily_sortino_r,
-            "max_dd_r_daily": max_dd_r_daily,
-            "max_dd_pct_initial": max_dd_pct_initial,
-            "best_day_r": best_day_r,
-            "worst_day_r": worst_day_r,
-            "var_95_r": var_95_r,
-            "cvar_95_r": cvar_95_r,
-            "skew_r": skew_r,
-            "kurtosis_r": kurtosis_r,
-            "pct_pos_days": pct_pos_days,
-            "max_underwater_days": int(max_underwater_days),
-            "calendar_days": total_calendar_days,
-            "days_with_trades": days_with_trades,
-            "trades_per_active_day": trades_per_active_day,
-            "trades_per_calendar_day": trades_per_calendar_day,
-        }
+def _ny_day_from_ts(ts: pd.Timestamp) -> pd.Timestamp:
+    return (
+        pd.to_datetime(ts)
+        .tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT")
+        .tz_convert(NY_TZ)
+        .normalize()
+        .tz_localize(None)
     )
 
-    return out
+
+def _compute_daily_metrics_rday(
+    daily_pnl_r: pd.Series,
+    *,
+    initial_capital: float,
+    trading_days_per_year: int,
+) -> dict[str, Any]:
+    s = daily_pnl_r.astype("float64")
+    if s.empty:
+        return {}
+
+    mean = float(s.mean())
+    std = float(s.std(ddof=1)) if len(s) > 1 else 0.0
+    daily_sharpe = (mean / std) * np.sqrt(trading_days_per_year) if std > 0 else 0.0
+
+    downside = s[s < 0]
+    downside_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+    daily_sortino = (
+        (mean / downside_std) * np.sqrt(trading_days_per_year) if downside_std > 0 else 0.0
+    )
+
+    eq = s.cumsum()
+    dd = eq - eq.cummax()
+    max_dd = float(dd.min()) if len(dd) else 0.0
+
+    # Underwater duration
+    underwater = dd < 0
+    max_underwater = 0
+    cur = 0
+    for v in underwater.values:
+        if v:
+            cur += 1
+            max_underwater = max(max_underwater, cur)
+        else:
+            cur = 0
+
+    # VaR / CVaR 95%
+    var95 = float(np.quantile(s.values, 0.05)) if len(s) else 0.0
+    tail = s[s <= var95]
+    cvar95 = float(tail.mean()) if len(tail) else var95
+
+    best = float(s.max())
+    worst = float(s.min())
+    pct_pos = float((s > 0).mean() * 100.0)
+
+    return {
+        "daily_sharpe_rday": float(daily_sharpe),
+        "daily_sortino_rday": float(daily_sortino),
+        "max_dd_r_day": float(max_dd),
+        "max_dd_pct_initial": float((max_dd / initial_capital) * 100.0) if initial_capital else 0.0,
+        "var95_rday": float(var95),
+        "cvar95_rday": float(cvar95),
+        "best_day_r": float(best),
+        "worst_day_r": float(worst),
+        "pct_positive_days": float(pct_pos),
+        "max_underwater_days": int(max_underwater),
+        "skew_rday": float(s.skew()) if len(s) > 2 else 0.0,
+        "kurtosis_rday": float(s.kurtosis()) if len(s) > 3 else 0.0,
+        "downside_std_rday": float(downside_std),
+        "downside_days": int((s < 0).sum()),
+    }
 
 
 def run_backtest(
     symbol: str,
     days: int,
-    max_trades_day: int = 2,
-    # STRATEGY PARAMS
-    min_slope: float = 0.15,
-    ema_period: int = 20,
-    pullback_bars: int = 3,
-    signal_close_frac: float = 0.30,
-    stop_buffer: float = 2.0,
-    min_risk_price_units: float = 2.0,
-    cooldown_bars: int = 10,
-    # REGIME FILTER
-    regime_filter: bool = False,
-    chop_threshold: float = 2.5,
-    # COSTS
-    costs_per_trade_r: float = 0.0,
-    # METRICS
-    initial_capital: float = 10000.0,
-    trading_days_per_year: int = 252,
+    *,
+    max_trades_day: int,
+    min_slope: float,
+    ema_period: int,
+    pullback_bars: int,
+    signal_close_frac: float,
+    stop_buffer: float,
+    min_risk_price_units: float,
+    cooldown_bars: int,
+    regime_filter: bool,
+    chop_threshold: float,
+    costs_per_trade_r: float,
+    initial_capital: float,
+    trading_days_per_year: int,
+    strict_m15_close: bool,
+    strict_entry_bar: bool,
 ) -> dict[str, Any]:
-    client = Mt5Client(mt5_module=mt5)
-    if not client.initialize():
-        return {"error": "MT5 init failed"}
-
-    spec = client.get_symbol_specification(symbol)
-    if not spec:
-        client.shutdown()
-        return {"error": "Symbol not found"}
-
-    print("\n" + "=" * 80)
+    print()
+    print("=" * 80)
     print(f"  BROOKS BACKTEST: {symbol} ({days} days)")
     if regime_filter:
         print(f"  🔎 REGIME FILTER: ENABLED (chop_threshold={chop_threshold})")
     else:
-        print("  ⚠️  REGIME FILTER: DISABLED")
-    if costs_per_trade_r > 0:
-        print(f"  💸 COSTS: {costs_per_trade_r:.4f}R per trade")
+        print("  🔎 REGIME FILTER: DISABLED")
+    print(
+        f"  💸 COSTS: {costs_per_trade_r:.4f}R per trade"
+        if costs_per_trade_r > 0
+        else "  💸 COSTS: disabled"
+    )
+    if strict_m15_close:
+        print("  🧪 AUDIT: strict_m15_close=ON (M15 features available at bar close)")
+    if strict_entry_bar:
+        print("  🧪 AUDIT: strict_entry_bar=ON (entry bar excluded from TP/SL hits)")
     print("=" * 80)
-    print("\n📊 STRATEGY PARAMETERS:")
+    print()
+    print("📊 STRATEGY PARAMETERS:")
     print(f"  Context    : min_slope={min_slope:.2f}, ema_period={ema_period}")
     print(f"  H2/L2      : pullback={pullback_bars}, close_frac={signal_close_frac:.2f}")
     print(f"  Risk       : stop_buffer={stop_buffer:.1f}, min_risk={min_risk_price_units:.1f}")
     print(f"  Execution  : cooldown={cooldown_bars}bars, max_trades_day={max_trades_day}")
     print()
 
-    count_m5 = days * 288
-    count_m15 = days * 96 * 2
+    print("Initializing MT5 connection...")
+    client = Mt5Client()
+    client.initialize()
+    acc = mt5.account_info()
+    term = mt5.terminal_info()
+    print(
+        f"MT5 connected. Terminal={term.name if term else 'unknown'}, Account={acc.login if acc else 'unknown'}"
+    )
+    print()
 
     logger.info("→ Fetching data...")
-    m15_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M15, count_m15))
-    m5_data = fetch_rates(mt5, RatesRequest(symbol, mt5.TIMEFRAME_M5, count_m5))
+    req_m15 = RatesRequest(symbol=symbol, timeframe=mt5.TIMEFRAME_M15, count=int(days * 24 * 4 * 4))
+    req_m5 = RatesRequest(symbol=symbol, timeframe=mt5.TIMEFRAME_M5, count=int(days * 24 * 12 * 4))
 
-    if m15_data.empty or m5_data.empty:
-        logger.warning("Empty data!")
-        client.shutdown()
-        return {"error": "Empty data"}
+    m15_data = fetch_rates(req_m15)
+    m5_data = fetch_rates(req_m5)
 
-    m15_data = _normalize_ohlc(m15_data, name="M15")
-    m5_data = _normalize_ohlc(m5_data, name="M5")
+    m15_data = _normalize_ohlc(m15_data, name="m15_data")
+    m5_data = _normalize_ohlc(m5_data, name="m5_data")
+
+    m15_data.index = pd.to_datetime(m15_data.index)
+    m5_data.index = pd.to_datetime(m5_data.index)
 
     logger.info("  M15: %d bars, M5: %d bars", len(m15_data), len(m5_data))
 
-    # Regime (optional)
-    regime_data = None
+    spec = client.get_symbol_spec(symbol)
+
+    # ----------------------------
+    # Regime (optional) + Trend
+    # ----------------------------
+    regime_data: pd.DataFrame | None = None
     if regime_filter:
         logger.info("→ Calculating market regime (vectorized)...")
         t0 = time.perf_counter()
 
-        regime_params = RegimeParams(chop_threshold=chop_threshold)
-        regime_series = detect_regime_series(m15_data, regime_params)
+        # IMPORTANT: RegimeParams in your codebase does NOT accept regime_filter kwarg.
+        params = RegimeParams(chop_threshold=chop_threshold)
+        reg_out = detect_regime_series(m15_data, params)
+        reg_series, chop_series = _safe_unpack_regime(reg_out)
 
-        high = m15_data["high"].astype(float)
-        low = m15_data["low"].astype(float)
-        close = m15_data["close"].astype(float)
-
-        bar_range = high - low
-        atr = bar_range.rolling(
-            regime_params.atr_period, min_periods=regime_params.atr_period
-        ).mean()
-        avg_atr = atr.rolling(
-            regime_params.range_period, min_periods=regime_params.range_period
-        ).mean()
-
-        range_high = close.rolling(
-            regime_params.range_period, min_periods=regime_params.range_period
-        ).max()
-        range_low = close.rolling(
-            regime_params.range_period, min_periods=regime_params.range_period
-        ).min()
-        price_range = range_high - range_low
-
-        threshold_range = regime_params.chop_threshold * avg_atr
-        chop_ratio = (price_range / threshold_range).fillna(0.0)
+        # Ensure index alignment to M15 data
+        reg_series = pd.Series(reg_series.values, index=m15_data.index)
+        if chop_series is not None:
+            chop_series = pd.Series(chop_series.values, index=m15_data.index)
 
         regime_data = pd.DataFrame(
-            {"regime": regime_series, "chop_ratio": chop_ratio}, index=m15_data.index
+            {
+                "regime": reg_series,
+                "chop_ratio": chop_series if chop_series is not None else np.nan,
+            },
+            index=m15_data.index,
         )
-
         logger.info("  Regime calc: %.2fs", time.perf_counter() - t0)
 
-    # Trends
-    m15_trends = precalculate_trends(
+    logger.info("→ Calculating trends (vectorized)...")
+    t0 = time.perf_counter()
+    trend_series = infer_trend_m15_series(
         m15_data, TrendParams(min_slope=min_slope, ema_period=ema_period)
     )
+    m15_trends = pd.DataFrame({"trend": trend_series}, index=m15_data.index)
+    logger.info("  Trend calc: %.2fs", time.perf_counter() - t0)
 
-    # Merge trends to M5
-    trend_series = m15_trends.reset_index().rename(columns={"index": "ts"})
-    m5_ts = m5_data.reset_index().rename(columns={"index": "ts"})
-    merged = pd.merge_asof(
-        m5_ts.sort_values("ts"),
-        trend_series.sort_values("ts"),
-        on="ts",
-        direction="backward",
-    )
-    m5_data = m5_data.copy()
-    m5_data["trend"] = merged["trend"].values
-
-    # Merge regime to M5 (if enabled)
+    # Build M15 feature frame for merge
+    m15_features = m15_trends.copy()
     if regime_filter and regime_data is not None:
-        regime_series_df = regime_data.reset_index().rename(columns={"index": "ts"})
-        merged_regime = pd.merge_asof(
-            m5_ts.sort_values("ts"),
-            regime_series_df.sort_values("ts"),
-            on="ts",
-            direction="backward",
-        )
-        m5_data["regime"] = merged_regime["regime"].values
-        m5_data["chop_ratio"] = merged_regime["chop_ratio"].values
+        m15_features["regime"] = regime_data["regime"]
+        m15_features["chop_ratio"] = regime_data["chop_ratio"]
 
+    # Align onto M5
+    m5_data = m5_data.copy()
+    m5_merged = _merge_m15_features_to_m5(m5_data, m15_features, strict_m15_close=strict_m15_close)
+    m5_data["trend"] = m5_merged["trend"].values
+    if regime_filter and "regime" in m5_merged.columns:
+        m5_data["regime"] = m5_merged["regime"].values
+        if "chop_ratio" in m5_merged.columns:
+            m5_data["chop_ratio"] = m5_merged["chop_ratio"].values
+
+    # ----------------------------
     # Distributions
+    # ----------------------------
     trend_counts = m5_data["trend"].value_counts()
     bull_bars = int(trend_counts.get(Trend.BULL, 0))
     bear_bars = int(trend_counts.get(Trend.BEAR, 0))
-    none_bars = int(m5_data["trend"].isna().sum())
+    range_bars = (
+        int(trend_counts.get(Trend.RANGE, 0))
+        if hasattr(Trend, "RANGE")
+        else int(m5_data["trend"].isna().sum())
+    )
 
     print("📈 TREND DISTRIBUTION:")
-    print(f"  Bull  : {bull_bars:5d} bars ({bull_bars / len(m5_data) * 100:5.1f}%)")
-    print(f"  Bear  : {bear_bars:5d} bars ({bear_bars / len(m5_data) * 100:5.1f}%)")
-    print(f"  Range : {none_bars:5d} bars ({none_bars / len(m5_data) * 100:5.1f}%)")
+    total = max(len(m5_data), 1)
+    print(f"  Bull  : {bull_bars:5d} bars ({bull_bars / total * 100:5.1f}%)")
+    print(f"  Bear  : {bear_bars:5d} bars ({bear_bars / total * 100:5.1f}%)")
+    print(f"  Range : {range_bars:5d} bars ({range_bars / total * 100:5.1f}%)")
 
-    if regime_filter:
-        regime_counts = m5_data["regime"].value_counts()
-        trending_bars = int(regime_counts.get(MarketRegime.TRENDING, 0))
-        choppy_bars = int(regime_counts.get(MarketRegime.CHOPPY, 0))
-        unknown_bars = int(regime_counts.get(MarketRegime.UNKNOWN, 0))
-        print("\n🔎 REGIME DISTRIBUTION:")
-        print(f"  Trending : {trending_bars:5d} bars ({trending_bars / len(m5_data) * 100:5.1f}%)")
-        print(f"  Choppy   : {choppy_bars:5d} bars ({choppy_bars / len(m5_data) * 100:5.1f}%)")
-        print(f"  Unknown  : {unknown_bars:5d} bars ({unknown_bars / len(m5_data) * 100:5.1f}%)")
+    if regime_filter and "regime" in m5_data.columns:
+        reg_counts = m5_data["regime"].value_counts()
+        trending_bars = int(reg_counts.get(MarketRegime.TRENDING, 0))
+        choppy_bars = int(reg_counts.get(MarketRegime.CHOPPY, 0))
+        unknown_bars = int(reg_counts.get(MarketRegime.UNKNOWN, 0))
+        print()
+        print("🔎 REGIME DISTRIBUTION:")
+        print(f"  Trending : {trending_bars:5d} bars ({trending_bars / total * 100:5.1f}%)")
+        print(f"  Choppy   : {choppy_bars:5d} bars ({choppy_bars / total * 100:5.1f}%)")
+        print(f"  Unknown  : {unknown_bars:5d} bars ({unknown_bars / total * 100:5.1f}%)")
     print()
 
-    # Strategy params (unchanged)
+    # ----------------------------
+    # Strategy parameters
+    # ----------------------------
     strat_params = H2L2Params(
         pullback_bars=pullback_bars,
         signal_close_frac=signal_close_frac,
@@ -473,25 +462,24 @@ def run_backtest(
         cooldown_bars=cooldown_bars,
     )
 
-    planned_trades: list[PlannedTrade] = []
-
+    # ----------------------------
+    # Planning
+    # ----------------------------
     logger.info("→ Planning trades (segment-based with regime filter)...")
     t_plan0 = time.perf_counter()
 
     total_bars = len(m5_data)
-
     segments: list[tuple[int, int, Side | None, MarketRegime | None]] = []
     current_trend: Side | None = None
     current_regime: MarketRegime | None = None
     segment_start = 50
 
-    # FIX: use idx consistently (was incorrectly using `i`)
     for idx in range(50, total_bars):
         trend_val = m5_data.iloc[idx]["trend"]
         side = _trend_to_side(trend_val) if not pd.isna(trend_val) else None
 
         regime_val: MarketRegime | None = None
-        if regime_filter:
+        if regime_filter and "regime" in m5_data.columns:
             regime_val = m5_data.iloc[idx].get("regime", MarketRegime.UNKNOWN)
 
         should_break = side != current_trend
@@ -510,6 +498,7 @@ def run_backtest(
 
     skipped_choppy = 0
     processed_segments = 0
+    planned_trades: list[PlannedTrade] = []
 
     for start_idx, end_idx, trend_side, regime_val in segments:
         if regime_filter and regime_val == MarketRegime.CHOPPY:
@@ -525,9 +514,9 @@ def run_backtest(
         trades = plan_h2l2_trades(segment_data, trend_side, spec, strat_params)
 
         segment_start_ts = m5_data.index[start_idx]
-        for t in trades:
-            if t.execute_ts >= segment_start_ts:
-                planned_trades.append(t)
+        for tr in trades:
+            if _get_trade_ts(tr) >= pd.to_datetime(segment_start_ts):
+                planned_trades.append(tr)
 
     planning_time = time.perf_counter() - t_plan0
 
@@ -548,7 +537,9 @@ def run_backtest(
             len(planned_trades),
         )
 
-    # Guardrails + selection (unchanged)
+    # ----------------------------
+    # Guardrails + selection
+    # ----------------------------
     logger.info("→ Applying guardrails (session + daily limit)...")
     g_session = Guardrails(
         session_tz=NY_TZ,
@@ -560,7 +551,9 @@ def run_backtest(
     in_session, rejected1 = apply_guardrails(planned_trades, g_session)
 
     selected, sel_stats = select_top_per_ny_day(
-        in_session, max_trades_day=max_trades_day, tick_size=float(spec.tick_size)
+        in_session,
+        max_trades_day=max_trades_day,
+        tick_size=float(getattr(spec, "tick_size", 1.0)),
     )
 
     g_all = Guardrails(
@@ -571,9 +564,7 @@ def run_backtest(
         max_trades_per_day=max_trades_day,
     )
     final_trades, rejected2 = apply_guardrails(selected, g_all)
-
-    # Ensure time order for time-based charts (does not change which trades exist)
-    final_trades = sorted(final_trades, key=lambda t: pd.to_datetime(t.execute_ts))
+    final_trades = sorted(final_trades, key=lambda tr: _get_trade_ts(tr))
 
     print("🔎 TRADE PIPELINE:")
     print(f"  Candidates    : {len(planned_trades):4d}")
@@ -584,39 +575,30 @@ def run_backtest(
     print(f"  Final         : {len(final_trades):4d}")
     print()
 
-    # Simulate (unchanged outcome), but capture real exit timestamp
+    # ----------------------------
+    # Simulate outcomes
+    # ----------------------------
     results_r: list[float] = []
     exit_ts_list: list[pd.Timestamp] = []
 
-    for t in final_trades:
-        raw_r, exit_ts = _simulate_trade_outcome(m5_data, t)
+    for tr in final_trades:
+        raw_r, exit_ts = _simulate_trade_outcome(m5_data, tr, strict_entry_bar=strict_entry_bar)
         net_r = _apply_costs(raw_r, costs_per_trade_r)
         results_r.append(net_r)
         exit_ts_list.append(pd.to_datetime(exit_ts))
 
     if not results_r:
-        logger.info("⚠️  No trades executed.")
+        logger.info("No trades executed.")
         client.shutdown()
         return {"error": "No trades"}
 
-    # Trade-level series on entry timestamp (for equity/drawdown/winrate)
-    trade_ts = pd.to_datetime([t.execute_ts for t in final_trades])
+    trade_ts = pd.to_datetime([_get_trade_ts(tr) for tr in final_trades])
     res = pd.Series(results_r, index=trade_ts, dtype="float64").sort_index()
 
     equity_curve = res.cumsum()
     running_max = equity_curve.cummax()
     drawdown = equity_curve - running_max
     max_dd_r = float(drawdown.min())
-
-    # Drawdown duration in trades
-    dd_bars = 0
-    max_dd_bars = 0
-    for dd_val in drawdown.values:
-        if dd_val < 0:
-            dd_bars += 1
-            max_dd_bars = max(max_dd_bars, dd_bars)
-        else:
-            dd_bars = 0
 
     wins = float(res[res > 0].sum())
     losses = float(-res[res < 0].sum())
@@ -626,216 +608,111 @@ def run_backtest(
     std_r = float(res.std(ddof=1)) if len(res) > 1 else 0.0
     sharpe_trade = float(mean_r / std_r) if std_r > 0 else 0.0
 
-    recovery_factor = float(equity_curve.iloc[-1] / abs(max_dd_r)) if max_dd_r < 0 else float("inf")
-    annual_r = float(equity_curve.iloc[-1]) * (252.0 / float(days))
-    mar_ratio = annual_r / abs(max_dd_r) if max_dd_r < 0 else float("inf")
-
     winrate = float((res > 0).sum() / len(res)) if len(res) else 0.0
 
-    avg_win_r = float(res[res > 0].mean()) if (res > 0).any() else 0.0
-    avg_loss_r = float(res[res < 0].mean()) if (res < 0).any() else 0.0  # negative
-    payoff_ratio = (avg_win_r / abs(avg_loss_r)) if avg_loss_r < 0 else float("inf")
-    max_consec_losses = _max_consecutive_losses(list(res.values))
-
-    # Side breakdown (keep consistent with final_trades order)
-    long_results = [r for t, r in zip(final_trades, results_r, strict=True) if t.side == Side.LONG]
-    short_results = [
-        r for t, r in zip(final_trades, results_r, strict=True) if t.side == Side.SHORT
-    ]
-    long_wr = (sum(1 for r in long_results if r > 0) / len(long_results)) if long_results else 0.0
-    short_wr = (
-        (sum(1 for r in short_results if r > 0) / len(short_results)) if short_results else 0.0
+    # Daily PnL in R/day using NY day buckets (entry timestamps)
+    ny_days = pd.Index([_ny_day_from_ts(ts) for ts in res.index], name="ny_day")
+    daily_pnl_r = (
+        pd.Series(res.values, index=ny_days, dtype="float64").groupby(level=0).sum().sort_index()
     )
 
-    # Period bounds
-    period_start = m5_data.index[0] if len(m5_data) else None
-    period_end = m5_data.index[-1] if len(m5_data) else None
-
-    # Build trades df with real exits
-    trades_df = _build_trades_dataframe(
-        final_trades,
-        results_r,
-        exit_ts_list,
-        m5_data=m5_data,
-        ny_tz=NY_TZ,
-    )
-
-    # Daily PnL (R/day) indexed by NY date
-    daily_pnl_r = _daily_series_from_trades(
-        trades_df, start_dt=period_start, end_dt=period_end, ny_tz=NY_TZ
-    )
-
-    # Manager metrics (R-based)
-    mgr = _compute_manager_metrics_r_based(
-        trades_df,
-        daily_pnl_r=daily_pnl_r,
-        trading_days_per_year=trading_days_per_year,
+    mgr = _compute_daily_metrics_rday(
+        daily_pnl_r,
         initial_capital=initial_capital,
+        trading_days_per_year=trading_days_per_year,
     )
 
-    # Output (stdout)
+    recovery_factor = float(res.sum() / abs(max_dd_r)) if max_dd_r < 0 else float("inf")
+    annual_r_est = float(res.sum()) * (252.0 / float(days))
+    mar_ratio = float(annual_r_est / abs(max_dd_r)) if max_dd_r < 0 else float("inf")
+
+    gross_profit = (
+        float((res + costs_per_trade_r).sum()) if costs_per_trade_r > 0 else float(res.sum())
+    )
+    total_cost = float(costs_per_trade_r) * float(len(res)) if costs_per_trade_r > 0 else 0.0
+
     print("=" * 80)
     print("  📊 RESULTS")
     print("=" * 80)
-
+    print()
     if costs_per_trade_r > 0:
-        total_cost = costs_per_trade_r * len(res)
-        gross_profit = float(equity_curve.iloc[-1]) + total_cost
-        print("\n💸 COSTS IMPACT:")
+        print("💸 COSTS IMPACT:")
         print(f"  Cost per trade : {costs_per_trade_r:.4f}R")
         print(f"  Total cost     : {total_cost:.2f}R over {len(res)} trades")
-        print(f"  Gross profit   : {gross_profit:+.2f}R (before costs)")
-        print(f"  Net profit     : {float(equity_curve.iloc[-1]):+.2f}R (after costs)")
-        if gross_profit != 0:
-            print(
-                f"  Impact         : {-total_cost:.2f}R ({-total_cost / gross_profit * 100:.1f}% reduction)"
-            )
-        else:
-            print(f"  Impact         : {-total_cost:.2f}R")
+        print(f"  Gross profit   : +{gross_profit:.2f}R (before costs)")
+        print(f"  Net profit     : +{res.sum():.2f}R (after costs)")
+        impact_pct = (total_cost / gross_profit * 100.0) if gross_profit != 0 else 0.0
+        print(f"  Impact         : -{total_cost:.2f}R (-{impact_pct:.1f}% reduction)")
+        print()
 
-    print("\n💰 PERFORMANCE:")
+    print("💰 PERFORMANCE:")
     print(f"  Trades        : {len(res):4d}")
-    print(f"  Net R         : {float(equity_curve.iloc[-1]):+7.2f}R")
-    print(f"  Avg R/trade   : {mean_r:+7.4f}R")
-    print(f"  Trade Sharpe  : {sharpe_trade:7.3f}  (trade-level, legacy)")
-    print(f"  Profit Factor : {profit_factor:7.2f}")
-
-    print("\n🎯 BROOKS METRICS:")
-    print(f"  Expectancy     : {mean_r:+7.4f}R per trade")
-    print(f"  Recovery Factor: {recovery_factor:7.2f} (Net/MaxDD)")
-    print(f"  MAR Ratio      : {mar_ratio:7.2f} (Annual/MaxDD)")
-    print(f"  Annual R est.  : {annual_r:+7.2f}R ({days} days → 252 days)")
+    print(f"  Net R         : {res.sum():+8.2f}R")
+    print(f"  Avg R/trade   : {mean_r:+0.4f}R")
+    print(f"  Trade Sharpe  : {sharpe_trade:8.3f}  (trade-level, legacy)")
+    print(f"  Profit Factor : {profit_factor:8.2f}")
+    print()
+    print("🎯 BROOKS METRICS:")
+    print(f"  Expectancy     : {mean_r:+.4f}R per trade")
+    print(f"  Recovery Factor: {recovery_factor:8.2f} (Net/MaxDD)")
+    print(f"  MAR Ratio      : {mar_ratio:8.2f} (Annual/MaxDD)")
+    print(f"  Annual R est.  : {annual_r_est:+.2f}R ({days} days → 252 days)")
+    print()
 
     if mgr:
-        print("\n📌 MANAGER METRICS (R/day):")
-        print(f"  Daily Sharpe (R/day)   : {mgr.get('daily_sharpe_r', 0.0):7.3f}")
-        print(f"  Daily Sortino (R/day)  : {mgr.get('daily_sortino_r', 0.0):7.3f}")
-        print(f"  Max DD (daily, R)      : {mgr.get('max_dd_r_daily', 0.0):7.2f}R")
+        print("📌 MANAGER METRICS (R/day):")
+        print(f"  Daily Sharpe (R/day)   : {mgr.get('daily_sharpe_rday', 0.0):7.3f}")
+        print(f"  Daily Sortino (R/day)  : {mgr.get('daily_sortino_rday', 0.0):7.3f}")
+        print(f"  Max DD (daily, R)      : {mgr.get('max_dd_r_day', 0.0):7.2f}R")
         print(f"  Max DD (% of initial)  : {mgr.get('max_dd_pct_initial', 0.0):7.3f}%")
-        print(f"  VaR 95% (R/day)        : {mgr.get('var_95_r', 0.0):7.3f}R")
-        print(f"  CVaR 95% (R/day)       : {mgr.get('cvar_95_r', 0.0):7.3f}R")
+        print(f"  VaR 95% (R/day)        : {mgr.get('var95_rday', 0.0):7.3f}R")
+        print(f"  CVaR 95% (R/day)       : {mgr.get('cvar95_rday', 0.0):7.3f}R")
         print(
-            f"  Best / Worst day (R)   : {mgr.get('best_day_r', 0.0):+7.2f} / {mgr.get('worst_day_r', 0.0):+7.2f}"
+            f"  Best / Worst day (R)   : {mgr.get('best_day_r', 0.0):7.2f} / {mgr.get('worst_day_r', 0.0):7.2f}"
         )
-        print(f"  % positive days        : {mgr.get('pct_pos_days', 0.0):7.2f}%")
-        print(f"  Max underwater (days)  : {mgr.get('max_underwater_days', 0)}")
-        print(f"  Trades/day active      : {mgr.get('trades_per_active_day', 0.0):.2f}")
-        print(f"  Trades/day calendar    : {mgr.get('trades_per_calendar_day', 0.0):.2f}")
+        print(f"  % positive days        : {mgr.get('pct_positive_days', 0.0):7.2f}%")
+        print(f"  Max underwater (days)  : {mgr.get('max_underwater_days', 0):4d}")
         print(
-            f"  Skew / Kurtosis (R/day): {mgr.get('skew_r', 0.0):+.3f} / {mgr.get('kurtosis_r', 0.0):+.3f}"
+            f"  Downside std (R/day)   : {mgr.get('downside_std_rday', 0.0):7.3f} (days: {mgr.get('downside_days', 0)})"
         )
+        print(
+            f"  Skew / Kurtosis (R/day): {mgr.get('skew_rday', 0.0):+0.3f} / {mgr.get('kurtosis_rday', 0.0):+0.3f}"
+        )
+        print()
 
-    print("\n📈 WIN/LOSS:")
-    print(f"  Winrate       : {winrate * 100:6.2f}%")
-    print(
-        f"  Winners       : {int((res > 0).sum()):4d} ({int((res > 0).sum()) / len(res) * 100:5.1f}%)"
-    )
-    print(
-        f"  Losers        : {int((res < 0).sum()):4d} ({int((res < 0).sum()) / len(res) * 100:5.1f}%)"
-    )
-    print(f"  Breakeven     : {int((res == 0).sum()):4d}")
+    print("📈 WIN/LOSS:")
+    print(f"  Winrate       : {winrate * 100:7.2f}%")
+    print(f"  Winners       : {(res > 0).sum():4d} ({winrate * 100:5.1f}%)")
+    print(f"  Losers        : {(res < 0).sum():4d} ({(1 - winrate) * 100:5.1f}%)")
+    print()
 
-    print("\n🧪 TRADE QUALITY:")
-    print(f"  Avg Win (R)   : {avg_win_r:+7.4f}")
-    print(f"  Avg Loss (R)  : {avg_loss_r:+7.4f}")
-    print(f"  Payoff Ratio  : {payoff_ratio:7.3f}")
-    print(f"  Max consec Ls : {max_consec_losses:4d}")
+    # Visual report
+    price_series = m15_data["close"].copy()
+    period_start = pd.to_datetime(m15_data.index.min())
+    period_end = pd.to_datetime(m15_data.index.max())
+    run_id = f"{symbol}_{days}d_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    command_args = " ".join(sys.argv)
 
-    print("\n📉 DRAWDOWN (trade-level):")
-    print(f"  Max DD        : {max_dd_r:7.2f}R")
-    print(f"  Max DD bars   : {max_dd_bars:4d} trades")
-
-    print("\n⚖️ SIDE BREAKDOWN:")
-    print(f"  Long trades   : {len(long_results):4d} (WR: {long_wr * 100:5.1f}%)")
-    print(f"  Short trades  : {len(short_results):4d} (WR: {short_wr * 100:5.1f}%)")
-
-    print("\n⏱️ PERFORMANCE:")
-    print(f"  Planning      : {planning_time:6.2f}s")
-    print(f"  Bars/second   : {total_bars / planning_time:8.1f}")
-
-    print("\n" + "=" * 80 + "\n")
-
-    # Price series (M15 close for chart)
-    price_series = m15_data["close"] if "close" in m15_data.columns else None
-
-    # Unique run id
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"{symbol}_{days}d_{timestamp}"
-
-    command_args = (
-        f"--days {days}"
-        + (" --regime-filter" if regime_filter else "")
-        + (f" --chop-threshold {chop_threshold}" if regime_filter else "")
-        + f" --stop-buffer {stop_buffer}"
-        + f" --cooldown {cooldown_bars}"
-        + f" --costs {costs_per_trade_r}"
-    )
-
-    # Stats dict for PNG
     stats: dict[str, Any] = {
-        # core trade-level
         "trades": int(len(res)),
-        "net_r": float(equity_curve.iloc[-1]),
-        "avg_r": float(mean_r),
-        "winrate_pct": float(winrate * 100.0),
+        "net_r": float(res.sum()),
+        "winrate": float(winrate),
         "profit_factor": float(profit_factor),
-        "max_dd_r_trade": float(max_dd_r),
-        "trade_sharpe": float(sharpe_trade),
+        "trade_sharpe_legacy": float(sharpe_trade),
+        "max_dd_r": float(max_dd_r),
         "recovery_factor": float(recovery_factor),
         "mar_ratio": float(mar_ratio),
-        "annual_r": float(annual_r),
-        # costs
+        "annual_r_est": float(annual_r_est),
+        "strict_m15_close": bool(strict_m15_close),
+        "strict_entry_bar": bool(strict_entry_bar),
         "costs_per_trade_r": float(costs_per_trade_r),
-        "total_cost_r": float(costs_per_trade_r * len(res)),
-        # trade quality
-        "avg_win_r": float(avg_win_r),
-        "avg_loss_r": float(avg_loss_r),
-        "payoff_ratio": float(payoff_ratio),
-        "max_consec_losses": int(max_consec_losses),
-        # side
-        "long_trades": int(len(long_results)),
-        "short_trades": int(len(short_results)),
-        "long_wr_pct": float(long_wr * 100.0),
-        "short_wr_pct": float(short_wr * 100.0),
-        # regime
-        "regime_filter": bool(regime_filter),
-        "choppy_segments_skipped": int(skipped_choppy if regime_filter else 0),
     }
-
-    # add manager metrics (R/day)
     stats.update(mgr)
 
-    # Add long/short PF + net R
-    def _pf_and_net(values: list[float]) -> tuple[float, float]:
-        if not values:
-            return 0.0, 0.0
-        s = pd.Series(values, dtype="float64")
-        w = float(s[s > 0].sum())
-        l = float(-s[s < 0].sum())
-        pf = (w / l) if l > 0 else float("inf")
-        return pf, float(s.sum())
-
-    pf_long, net_long = _pf_and_net(long_results)
-    pf_short, net_short = _pf_and_net(short_results)
-    stats["pf_long"] = pf_long
-    stats["net_r_long"] = net_long
-    stats["pf_short"] = pf_short
-    stats["net_r_short"] = net_short
-
-    # Regime breakdown (if present)
-    if "regime_at_entry" in trades_df.columns and trades_df["regime_at_entry"].notna().any():
-        for reg in sorted(trades_df["regime_at_entry"].dropna().unique().tolist()):
-            rdf = trades_df[trades_df["regime_at_entry"] == reg]
-            if rdf.empty:
-                continue
-            stats[f"trades_reg_{reg}"] = int(len(rdf))
-            stats[f"net_r_reg_{reg}"] = float(rdf["net_r"].sum())
-
-    # Generate report
     generate_performance_report(
-        results_r=res,  # time-indexed Series (entry_time)
-        equity_curve=equity_curve,  # time-indexed Series
-        drawdown=drawdown,  # time-indexed Series
+        results_r=res,
+        equity_curve=equity_curve,
+        drawdown=drawdown,
         symbol=symbol,
         days=days,
         run_id=run_id,
@@ -844,7 +721,7 @@ def run_backtest(
         period_end=period_end,
         stats=stats,
         price_series=price_series,
-        daily_pnl=daily_pnl_r,  # NY date-indexed series
+        daily_pnl=daily_pnl_r,
     )
 
     client.shutdown()
@@ -852,10 +729,10 @@ def run_backtest(
     return {
         "days": days,
         "trades": int(len(res)),
-        "net_r": float(equity_curve.iloc[-1]),
+        "net_r": float(res.sum()),
         "winrate": float(winrate),
         "profit_factor": float(profit_factor),
-        "max_dd_r_trade": float(max_dd_r),
+        "max_dd_r": float(max_dd_r),
         "avg_r": float(mean_r),
         "trade_sharpe": float(sharpe_trade),
         **mgr,
@@ -864,8 +741,11 @@ def run_backtest(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--symbol", type=str, default="US500.cash")
     parser.add_argument("--days", type=int, default=60)
+
+    # Execution / selection
     parser.add_argument("--max-trades-day", type=int, default=2)
 
     # Strategy params
@@ -878,21 +758,29 @@ if __name__ == "__main__":
     parser.add_argument("--cooldown", type=int, default=10)
 
     # Regime filter
-    parser.add_argument(
-        "--regime-filter", action="store_true", help="Enable regime filter (skip choppy markets)"
-    )
-    parser.add_argument(
-        "--chop-threshold", type=float, default=2.5, help="Chop threshold (higher = stricter)"
-    )
+    parser.add_argument("--regime-filter", action="store_true")
+    parser.add_argument("--chop-threshold", type=float, default=2.5)
 
     # Costs
     parser.add_argument(
-        "--costs", type=float, default=0.0, help="Trading costs per trade in R (e.g., 0.04)"
+        "--costs", type=float, default=0.0, help="Trading costs per trade in R (e.g. 0.04)"
     )
 
-    # Metrics (only used for labeling % of initial in R-based reporting)
+    # Metrics
     parser.add_argument("--initial-capital", type=float, default=10000.0)
     parser.add_argument("--trading-days-year", type=int, default=252)
+
+    # Audit switches (optional, default OFF to preserve baseline behavior)
+    parser.add_argument(
+        "--strict-m15-close",
+        action="store_true",
+        help="Shift M15 features to bar close before M5 merge",
+    )
+    parser.add_argument(
+        "--strict-entry-bar",
+        action="store_true",
+        help="Exclude entry bar from TP/SL hit simulation",
+    )
 
     args = parser.parse_args()
 
@@ -912,4 +800,6 @@ if __name__ == "__main__":
         costs_per_trade_r=args.costs,
         initial_capital=args.initial_capital,
         trading_days_per_year=args.trading_days_year,
+        strict_m15_close=args.strict_m15_close,
+        strict_entry_bar=args.strict_entry_bar,
     )
