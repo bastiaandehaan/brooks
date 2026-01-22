@@ -73,3 +73,24 @@ config/local*.yml
 
 backtest/backtest_png/
 backtest_png/
+
+# =========================
+# Local/prod config (never commit)
+# =========================
+config/production.yaml
+
+# =========================
+# Local DB / cache
+# =========================
+*.sqlite
+*.db
+
+# =========================
+# Profiling
+# =========================
+*.prof
+
+# =========================
+# Local analysis outputs
+# =========================
+knobs_and_mismatches.json
