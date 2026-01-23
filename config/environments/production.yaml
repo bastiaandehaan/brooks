@@ -1,0 +1,67 @@
+# config/environments/production.yaml
+# Brooks Trading Framework - Production Environment Configuration
+# Infrastructure only (MT5, Telegram, FTMO rules) - NO strategy parameters
+
+symbol: US500.cash
+
+# MT5 Connection (leave null for credentials prompt)
+mt5:
+  login: null
+  password: null
+  server: null
+  timeout_ms: 10000
+
+# FTMO Protection (CRITICAL for challenge compliance)
+ftmo:
+  enabled: true  # Set to false for non-FTMO accounts
+
+  # Account specifications
+  account_size: 10000  # USD (10k, 25k, 50k, 100k, 200k)
+
+  # Profit target (percentage)
+  profit_target_pct: 10.0  # 10% for Challenge, 5% for Verification
+
+  # Loss limits (percentages - applied to initial balance)
+  max_daily_loss_pct: 5.0   # 5% max daily loss
+  max_total_loss_pct: 10.0  # 10% max total drawdown
+
+  # Trading requirements
+  min_trading_days: 4  # Minimum days with trades to pass (FTMO default)
+
+  # Safety buffers (percentages to subtract from limits)
+  # Your FTMORules uses these to stop BEFORE hitting hard limits
+  daily_buffer_pct: 1.0   # Stop at 4% instead of 5% (1% safety margin)
+  total_buffer_pct: 2.0   # Stop at 8% instead of 10% (2% safety margin)
+
+  # Pass mode (after profit target hit)
+  pass_mode:
+    enabled: true
+    risk_multiplier: 0.10  # Reduce risk to 10% after target hit
+    max_trades_day: 1      # Only best setup per day in pass mode
+
+# Telegram Notifications (optional)
+telegram:
+  enabled: false
+  bot_token: null  # Get from @BotFather
+  chat_id: null    # Your chat ID
+
+# Emergency Stop (create STOP.txt in project root to halt)
+emergency_stop:
+  enabled: true
+  check_file: "STOP.txt"
+
+# Logging
+logging:
+  level: INFO  # DEBUG for verbose, INFO for normal, WARNING for minimal
+  ftmo_status_interval: 300  # Log FTMO status every 5 minutes (seconds)
+
+# Session (should match strategy config guardrails)
+session:
+  timezone: America/New_York
+
+# Notes:
+# - All FTMO values are in USD
+# - Buffers are MANDATORY - never set to 1.0 (no safety margin)
+# - daily_buffer 0.85 means you can use $425 of $500 daily limit
+# - total_buffer 0.90 means you can use $900 of $1000 total limit
+# - Update account_size/limits for 25k, 50k, 100k accounts accordingly

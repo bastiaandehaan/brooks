@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Brooks Live Monitor - Production-safe monitor (manual execution workflow)
+Brooks Live Monitor - WITH FTMO PROTECTION
 
-Key rules:
-- Session window is NYSE cash hours: 09:30-16:00 ET
-- Optional "no-new-trades" cutoff before the close (default 15:30 ET)
-  to avoid late-session noise/whipsaws.
-- This script only DETECTS and NOTIFIES. No order execution.
+Key Changes for FTMO Integration:
+1. Initialize FTMOState at startup
+2. Update state every iteration (equity + timestamp)
+3. Call trade_gate BEFORE sizing
+4. Use capped risk for position sizing
+5. Log FTMO status periodically
 
-Usage example:
-python scripts/live_monitor.py --symbol US500.cash --risk-pct 0.5 --regime-filter --chop-threshold 2.0 --stop-buffer 1.0 --interval 30
+CRITICAL: All risk calculations use EQUITY (not balance)
 """
 
 from __future__ import annotations
@@ -19,137 +19,180 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional, Tuple
 
 import MetaTrader5 as mt5
 import pandas as pd
+import yaml
 
-# project root on path
+# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from execution.ftmo_guardian import FTMOAccountType, FTMOGuardian
+from execution.ftmo_guardian import FTMOGuardian
+
+# FTMO imports
+from execution.ftmo_state import FTMOState
 from execution.guardrails import Guardrails, apply_guardrails
 from execution.risk_manager import RiskManager
+from execution.trade_gate import (
+    check_ftmo_trade_gate,
+    convert_risk_to_pct,
+    log_ftmo_status,
+)
+from strategies.config import StrategyConfig
 from strategies.context import Trend, TrendParams, infer_trend_m15
 from strategies.h2l2 import H2L2Params, Side, plan_next_open_trade
 from strategies.regime import RegimeParams, should_trade_today
 from utils.mt5_client import Mt5Client
 from utils.mt5_data import RatesRequest, fetch_rates
-from utils.telegram_bot import TelegramBot, TradingSignal
-
-# Optional debug logger (best-effort)
-try:
-    from utils.debug_logger import DebugLogger, capture_error_context  # type: ignore
-
-    DEBUG_AVAILABLE = True
-except Exception:
-    DEBUG_AVAILABLE = False
-    DebugLogger = None  # type: ignore
-
 
 logger = logging.getLogger(__name__)
-
 NY_TZ = "America/New_York"
 
 
-@dataclass(frozen=True)
-class SessionConfig:
-    tz: str = NY_TZ
-    session_start: str = "09:30"  # ET
-    session_end: str = "16:00"  # ET (NYSE cash close)
-    trade_cutoff: str = "15:30"  # ET (no new trades after this time)
+def load_ftmo_config(env_config_path: str) -> dict:
+    """Load FTMO configuration from environment YAML"""
+    try:
+        with open(env_config_path, "r") as f:
+            env_config = yaml.safe_load(f)
+        return env_config.get("ftmo", {})
+    except Exception as e:
+        logger.error("Failed to load FTMO config: %s", e)
+        return {}
 
 
-def _parse_hhmm(hhmm: str) -> pd.Timestamp:
-    # Only used for .time() extraction; date part irrelevant.
-    return pd.Timestamp(hhmm)
-
-
-def now_ny() -> pd.Timestamp:
-    return pd.Timestamp.now(tz=NY_TZ)
-
-
-def session_state(cfg: SessionConfig, ts: pd.Timestamp | None = None) -> tuple[str, pd.Timestamp]:
+def initialize_ftmo_protection(
+    ftmo_config: dict,
+    initial_equity: float,
+    day_tz: str = NY_TZ,
+) -> Tuple[Optional[FTMOGuardian], Optional[FTMOState]]:
     """
-    Returns (state, now_ny_ts) where state ∈ {"OUTSIDE", "ACTIVE", "CUTOFF"}.
+    Initialize FTMO protection system.
 
-    OUTSIDE: outside 09:30-16:00 ET
-    ACTIVE : in session and before cutoff
-    CUTOFF : in session but after cutoff (no new trades)
+    Returns:
+        (guardian, state) or (None, None) if FTMO disabled
     """
-    ts_ny = ts if ts is not None else now_ny()
-    cur = ts_ny.time()
+    if not ftmo_config.get("enabled", False):
+        logger.info("FTMO protection: DISABLED")
+        return None, None
 
-    start = _parse_hhmm(cfg.session_start).time()
-    end = _parse_hhmm(cfg.session_end).time()
-    cutoff = _parse_hhmm(cfg.trade_cutoff).time()
+    logger.info("=" * 70)
+    logger.info("🛡️  INITIALIZING FTMO PROTECTION")
+    logger.info("=" * 70)
 
-    if cur < start or cur > end:
-        return "OUTSIDE", ts_ny
-    if cur >= cutoff:
-        return "CUTOFF", ts_ny
-    return "ACTIVE", ts_ny
+    # Import FTMORules
+    from execution.ftmo_guardian import FTMOAccountType, FTMORules
+
+    # Map account size to account type
+    account_size = ftmo_config["account_size"]
+    if account_size == 10000:
+        rules = FTMORules.for_10k_challenge()
+    elif account_size == 25000:
+        rules = FTMORules(
+            account_type=FTMOAccountType.CHALLENGE_25K,
+            initial_balance=25000.0,
+            profit_target_pct=10.0,
+        )
+    elif account_size == 50000:
+        rules = FTMORules(
+            account_type=FTMOAccountType.CHALLENGE_50K,
+            initial_balance=50000.0,
+            profit_target_pct=10.0,
+        )
+    else:
+        # Custom size
+        rules = FTMORules(
+            account_type=FTMOAccountType.CHALLENGE_10K,
+            initial_balance=account_size,
+            profit_target_pct=ftmo_config.get("profit_target_pct", 10.0),
+        )
+
+    # Override buffers if specified in config
+    if "daily_buffer_pct" in ftmo_config:
+        rules.daily_loss_buffer_pct = ftmo_config["daily_buffer_pct"]
+    if "total_buffer_pct" in ftmo_config:
+        rules.total_loss_buffer_pct = ftmo_config["total_buffer_pct"]
+
+    # Create guardian
+    guardian = FTMOGuardian(rules=rules)
+
+    # Create state tracker
+    state = FTMOState.initialize(initial_equity, day_tz)
+
+    logger.info("  Account Size: $%,.2f", rules.initial_balance)
+    logger.info(
+        "  Profit Target: $%,.2f (%.0f%%)",
+        rules.initial_balance * rules.profit_target_pct / 100,
+        rules.profit_target_pct,
+    )
+    logger.info("  Max Daily Loss: $%,.2f", guardian.max_daily_loss_usd)
+    logger.info("  Max Total Loss: $%,.2f", guardian.max_total_loss_usd)
+    logger.info("  Safe Daily (buffer): $%,.2f", guardian.safe_daily_loss_usd)
+    logger.info("  Safe Total (buffer): $%,.2f", guardian.safe_total_loss_usd)
+    logger.info("  Min Trading Days: %d", rules.min_trading_days)
+    logger.info("  Initial Equity: $%,.2f", initial_equity)
+    logger.info("=" * 70)
+
+    return guardian, state
 
 
-def check_emergency_stop(project_root: str | None = None) -> tuple[bool, str | None]:
-    """STOP.txt in project root stops the monitor."""
-    root = project_root or os.getcwd()
-    stop_file = os.path.join(root, "STOP.txt")
-    if os.path.exists(stop_file):
-        try:
-            reason = open(stop_file, encoding="utf-8", errors="ignore").read().strip()
-            return True, reason if reason else "Emergency stop activated"
-        except Exception:
-            return True, "Emergency stop file found"
-    return False, None
-
-
-def _hygiene(df: pd.DataFrame) -> pd.DataFrame:
-    # keep it simple: sort index, drop duplicate timestamps
-    if df is None or df.empty:
-        return df
-    out = df.sort_index()
-    out = out[~out.index.duplicated(keep="last")]
-    return out
-
-
-def check_for_signals(
+def check_for_signals_with_ftmo(
     *,
     symbol: str,
-    risk_pct: float,
-    regime_filter: bool,
-    chop_threshold: float,
-    stop_buffer: float,
-    ftmo_guardian: FTMOGuardian | None,
-    telegram_bot: TelegramBot,
-    debug_logger: DebugLogger | None,
+    strategy_config: StrategyConfig,
+    ftmo_guardian: Optional[FTMOGuardian],
+    ftmo_state: Optional[FTMOState],
+    running_max_equity: float,
 ) -> bool:
     """
-    Check for Brooks signals and send Telegram notification if found.
-    Returns True if a signal was sent.
+    Check for trading signals WITH FTMO protection.
+
+    Returns:
+        True if signal found and trade allowed, False otherwise
     """
     logger.info("🔍 Checking for signals...")
 
-    m15_data: pd.DataFrame | None = None
-    m5_data: pd.DataFrame | None = None
-
-    config = {
-        "symbol": symbol,
-        "risk_pct": risk_pct,
-        "regime_filter": regime_filter,
-        "chop_threshold": chop_threshold,
-        "stop_buffer": stop_buffer,
-    }
-
     try:
+        # Connect to MT5
         client = Mt5Client(mt5_module=mt5)
         if not client.initialize():
             logger.error("❌ Failed to connect to MT5")
-            telegram_bot.send_error("MT5 connection failed")
             return False
 
+        # Get current account state
+        acc_info = mt5.account_info()
+        if not acc_info:
+            logger.error("❌ Failed to get account info")
+            client.shutdown()
+            return False
+
+        equity_now = float(acc_info.equity)
+        balance_now = float(acc_info.balance)
+
+        logger.info("💰 Account: equity=$%.2f, balance=$%.2f", equity_now, balance_now)
+
+        # Update FTMO state (if enabled)
+        if ftmo_state:
+            now_utc = pd.Timestamp.now(tz="UTC")
+            day_reset = ftmo_state.update(equity_now, now_utc)
+
+            if day_reset:
+                logger.info("🔄 New NY trading day - daily limits reset")
+
+        # Check FTMO status (if enabled)
+        if ftmo_guardian and ftmo_state:
+            daily_pnl = ftmo_state.get_daily_pnl(equity_now)
+            guardian_status = ftmo_guardian.get_status(equity_now, daily_pnl)
+
+            if guardian_status["status"] in ["STOP_DAILY", "STOP_TOTAL"]:
+                logger.error("⛔ FTMO BLOCKED: %s", guardian_status["status"])
+                client.shutdown()
+                return False
+
+        # Get symbol spec
         spec = client.get_symbol_specification(symbol)
-        if spec is None:
+        if not spec:
             logger.error("❌ Symbol %s not found", symbol)
             client.shutdown()
             return False
@@ -158,45 +201,26 @@ def check_for_signals(
         req_m15 = RatesRequest(symbol, mt5.TIMEFRAME_M15, 300)
         req_m5 = RatesRequest(symbol, mt5.TIMEFRAME_M5, 500)
 
-        m15_data = _hygiene(fetch_rates(mt5, req_m15))
-        m5_data = _hygiene(fetch_rates(mt5, req_m5))
+        m15_data = fetch_rates(mt5, req_m15)
+        m5_data = fetch_rates(mt5, req_m5)
 
         if m15_data.empty or m5_data.empty:
-            logger.warning(
-                "⚠️ Empty dataframes from MT5 (m15=%s, m5=%s)", len(m15_data), len(m5_data)
-            )
+            logger.warning("⚠️ Empty dataframes")
             client.shutdown()
             return False
 
-        # Regime filter
-        regime_status = "UNKNOWN"
-        if regime_filter:
-            regime_params = RegimeParams(chop_threshold=chop_threshold)
-            ok, reason = should_trade_today(m15_data, regime_params)
+        # Regime filter (if enabled)
+        if strategy_config.regime_filter:
+            ok, reason = should_trade_today(m15_data, strategy_config.regime_params)
             if not ok:
                 logger.info("⛔ Regime filter: %s", reason)
                 client.shutdown()
                 return False
-            logger.info("✅ Regime filter: %s", reason)
-            regime_status = "TRENDING"
+            logger.info("✅ Regime: %s", reason)
 
-        # FTMO check (optional)
-        if ftmo_guardian:
-            acc = mt5.account_info()
-            if acc:
-                can_trade, limit_reason = ftmo_guardian.can_open_trade(acc.balance)
-                if not can_trade:
-                    logger.warning("⛔ FTMO Guardian: %s", limit_reason)
-                    telegram_bot.send_error(f"FTMO limit: {limit_reason}")
-                    client.shutdown()
-                    return False
-
-        # Trend inference (M15)
-        tparams = TrendParams()
-        trend, trend_reason = infer_trend_m15(m15_data, tparams)
-        logger.info(
-            "Trend: %s (%s)", trend.value if hasattr(trend, "value") else str(trend), trend_reason
-        )
+        # Trend inference
+        trend, _ = infer_trend_m15(m15_data, strategy_config.trend_params)
+        logger.info("📊 Trend: %s", trend.value if hasattr(trend, "value") else str(trend))
 
         if trend not in (Trend.BULL, Trend.BEAR):
             logger.info("No clear trend")
@@ -205,278 +229,226 @@ def check_for_signals(
 
         side = Side.LONG if trend == Trend.BULL else Side.SHORT
 
-        # Plan trade (NEXT_OPEN contract)
-        hparams = H2L2Params(
-            min_risk_price_units=1.0, signal_close_frac=0.30, pullback_bars=2, cooldown_bars=0
+        # Plan trade
+        planned = plan_next_open_trade(
+            m5_data,
+            side,
+            spec,
+            strategy_config.h2l2_params,
+            timeframe_minutes=5,
         )
-        planned = plan_next_open_trade(m5_data, side, spec, hparams, timeframe_minutes=5)
 
         if not planned:
-            logger.info("No setup")
+            logger.info("No setup found")
             client.shutdown()
             return False
 
-        # Risk sizing
+        logger.info("✅ Setup found: %s", planned.reason)
+
+        # === FTMO TRADE GATE (CRITICAL) ===
+        # Calculate requested risk in USD
+        requested_risk_usd = (strategy_config.risk_pct / 100.0) * equity_now
+
+        if ftmo_guardian and ftmo_state:
+            # Check FTMO gate
+            gate_result = check_ftmo_trade_gate(
+                equity_now=equity_now,
+                ftmo_state=ftmo_state,
+                ftmo_guardian=ftmo_guardian,
+                requested_risk_usd=requested_risk_usd,
+                min_risk_threshold=10.0,
+            )
+
+            if gate_result.blocked:
+                logger.warning("⛔ FTMO GATE BLOCKED: %s", gate_result.reason)
+                client.shutdown()
+                return False
+
+            # Use FTMO-capped risk
+            risk_usd_final = gate_result.capped_risk_usd
+            risk_pct_final = convert_risk_to_pct(risk_usd_final, equity_now)
+
+            logger.info(
+                "💰 Risk: requested=$%.2f, FTMO-capped=$%.2f (%.3f%%)",
+                requested_risk_usd,
+                risk_usd_final,
+                risk_pct_final,
+            )
+        else:
+            # No FTMO protection - use requested risk
+            risk_usd_final = requested_risk_usd
+            risk_pct_final = strategy_config.risk_pct
+
+            logger.info(
+                "💰 Risk: $%.2f (%.2f%%) - NO FTMO PROTECTION", risk_usd_final, risk_pct_final
+            )
+
+        # === POSITION SIZING ===
         rm = RiskManager()
-        lots, risk_usd = rm.size_position(
-            balance=float(mt5.account_info().balance) if mt5.account_info() else 0.0,
-            risk_pct=risk_pct,
+        lots, final_risk_usd = rm.size_position(
+            balance=equity_now,  # Use equity!
+            risk_pct=risk_pct_final,
             entry=planned.entry,
             stop=planned.stop,
-            spec=spec,
-            min_risk_price_units=1.0,
-            fees_usd=0.0,
+            tick_size=float(spec.tick_size),
+            tick_value=float(spec.tick_value),
+            contract_size=float(spec.contract_size),
         )
 
         if lots <= 0:
-            logger.info("Sizing rejected (lots=%s risk_usd=%s)", lots, risk_usd)
+            logger.warning("⚠️ Position sizing rejected (lots=%s)", lots)
             client.shutdown()
             return False
 
-        # Guardrails (1 trade per timestamp etc. happens in your guardrails)
+        # === GUARDRAILS ===
         g = Guardrails(
-            max_trades_per_day=2,
-            session_start="09:30",
-            session_end="16:00",
-            day_tz=NY_TZ,
-            session_tz=NY_TZ,
+            max_trades_per_day=strategy_config.guardrails.max_trades_per_day,
+            session_start=strategy_config.guardrails.session_start,
+            session_end=strategy_config.guardrails.session_end,
+            day_tz=strategy_config.guardrails.day_tz,
+            session_tz=strategy_config.guardrails.session_tz,
         )
 
         accepted, rejected = apply_guardrails([planned], g)
         if not accepted:
-            logger.info(
-                "Guardrails rejected trade (reason=%s)",
-                rejected[0].reason if rejected else "unknown",
-            )
+            logger.info("⛔ Guardrails rejected trade")
             client.shutdown()
             return False
 
-        pick = accepted[0]
+        # === SIGNAL OUTPUT ===
+        print("\n" + "!" * 70)
+        print(f"  🎯 BROOKS TRADE SIGNAL: {symbol}")
+        print("!" * 70)
+        print(f"  Side: {planned.side.value}")
+        print(f"  Entry: {planned.entry:.2f}")
+        print(f"  Stop: {planned.stop:.2f}")
+        print(f"  Target: {planned.tp:.2f}")
+        print(f"  Volume: {lots:.2f} lots")
+        print(f"  Risk: ${final_risk_usd:.2f} ({risk_pct_final:.2f}%)")
+        print(f"  Reason: {planned.reason}")
+        if ftmo_guardian:
+            print(f"  FTMO Protected: ✅ (capped from ${requested_risk_usd:.2f})")
+        print("!" * 70 + "\n")
 
-        # Send notification
-        sig = TradingSignal(
-            symbol=symbol,
-            side=pick.side.value,
-            entry=pick.entry,
-            stop=pick.stop,
-            target=pick.tp,
-            reason=pick.reason,
-            timeframe="M5",
-        )
-        telegram_bot.send_signal(sig, lots=lots, risk_usd=risk_usd, regime=regime_status)
-
-        # Debug dump
-        if DEBUG_AVAILABLE and debug_logger:
-            try:
-                debug_logger.log_trade(
-                    {
-                        "ts": now_ny().isoformat(),
-                        "symbol": symbol,
-                        "side": pick.side.value,
-                        "entry": pick.entry,
-                        "stop": pick.stop,
-                        "target": pick.tp,
-                        "lots": lots,
-                        "risk_usd": risk_usd,
-                        "risk_pct": risk_pct,
-                        "reason": pick.reason,
-                        "regime": regime_status,
-                        "status": "signaled",
-                    }
-                )
-            except Exception:
-                pass
+        logger.info("📱 Signal ready - MANUAL EXECUTION REQUIRED")
 
         client.shutdown()
         return True
 
     except Exception as e:
         logger.error("❌ Error checking signals: %s", e, exc_info=True)
-
-        if DEBUG_AVAILABLE and debug_logger:
-            try:
-                ctx = capture_error_context(e, market_data=m5_data, config=config)  # type: ignore
-                debug_logger.log_error(ctx)  # type: ignore
-            except Exception:
-                pass
-
-        try:
-            telegram_bot.send_error(f"Error: {str(e)}")
-        except Exception:
-            pass
-
         return False
 
 
 def run_monitor(
     *,
-    symbol: str,
-    risk_pct: float,
-    regime_filter: bool,
-    chop_threshold: float,
-    stop_buffer: float,
+    strategy_config_path: str,
+    env_config_path: str,
     check_interval: int,
-    enable_ftmo_protection: bool,
-    ftmo_account_size: int,
-    cfg: SessionConfig,
 ) -> None:
-    # Debug logger
-    debug_logger = None
-    if DEBUG_AVAILABLE:
-        try:
-            debug_logger = DebugLogger(log_dir="logs")  # type: ignore
-            logger.info("✅ Debug logging enabled")
-        except Exception as e:
-            logger.warning("⚠️ Could not initialize debug logger: %s", e)
+    """
+    Run live monitor with FTMO protection.
+    """
+    # Load configs
+    strategy_config = StrategyConfig.load(strategy_config_path)
+    ftmo_config = load_ftmo_config(env_config_path)
 
-    telegram_bot = TelegramBot()
+    # Initialize MT5 to get initial equity
+    client = Mt5Client(mt5_module=mt5)
+    if not client.initialize():
+        logger.error("Failed to initialize MT5")
+        return
 
-    # FTMO Guardian (optional)
-    ftmo_guardian: FTMOGuardian | None = None
-    if enable_ftmo_protection:
-        try:
-            account_type = (
-                FTMOAccountType.CHALLENGE_10K
-                if int(ftmo_account_size) == 10000
-                else FTMOAccountType.CHALLENGE_25K
-            )
-            ftmo_guardian = FTMOGuardian(account_type=account_type)
-            logger.info("✅ FTMO Guardian enabled")
-        except Exception as e:
-            logger.error("❌ Could not initialize FTMO Guardian: %s", e)
-            logger.info("Continuing without FTMO protection.")
+    acc_info = mt5.account_info()
+    if not acc_info:
+        logger.error("Failed to get account info")
+        client.shutdown()
+        return
 
-    startup_msg = (
-        "🤖 <b>Brooks Live Monitor Started</b>\n\n"
-        f"Symbol: {symbol}\n"
-        f"Risk: {risk_pct}%\n"
-        f"Regime Filter: {'ON' if regime_filter else 'OFF'}\n"
-        f"Check Interval: {check_interval}s\n"
-        f"Session: {cfg.session_start}-{cfg.session_end} ET\n"
-        f"No-new-trades after: {cfg.trade_cutoff} ET\n"
-        f"FTMO Protection: {'ENABLED' if ftmo_guardian else 'DISABLED'}\n"
-        f"Debug Logging: {'ON' if debug_logger else 'OFF'}\n"
+    initial_equity = float(acc_info.equity)
+    client.shutdown()
+
+    # Initialize FTMO protection
+    ftmo_guardian, ftmo_state = initialize_ftmo_protection(
+        ftmo_config,
+        initial_equity,
+        day_tz=NY_TZ,
     )
-    telegram_bot.send_message(startup_msg)
+
+    # Track running max equity
+    running_max_equity = initial_equity
+    last_ftmo_log = time.time()
+    ftmo_log_interval = ftmo_config.get("logging", {}).get("ftmo_status_interval", 300)
+
+    logger.info("🤖 Brooks Live Monitor Started")
+    logger.info("Strategy: %s", strategy_config_path)
+    logger.info("Check interval: %ds", check_interval)
 
     iteration = 0
     try:
         while True:
             iteration += 1
 
-            stop_requested, stop_reason = check_emergency_stop()
-            if stop_requested:
-                msg = f"🛑 Emergency stop: {stop_reason}"
-                logger.warning(msg)
-                telegram_bot.send_error(msg)
+            # Check emergency stop
+            if os.path.exists("STOP.txt"):
+                logger.warning("🛑 Emergency stop detected")
                 break
 
-            state, ts_ny = session_state(cfg)
-            logger.info(
-                "NY time now: %s ET | state=%s | check=%d",
-                ts_ny.strftime("%H:%M:%S"),
-                state,
-                iteration,
-            )
+            # Get current equity
+            client = Mt5Client(mt5_module=mt5)
+            if client.initialize():
+                acc_info = mt5.account_info()
+                if acc_info:
+                    equity_now = float(acc_info.equity)
+                    running_max_equity = max(running_max_equity, equity_now)
+                client.shutdown()
+            else:
+                equity_now = running_max_equity
 
-            if state == "OUTSIDE":
-                logger.info("⏸️ Outside NY session - sleeping %ss...", check_interval)
-                time.sleep(check_interval)
-                continue
+            # Log FTMO status periodically
+            if ftmo_guardian and ftmo_state:
+                if time.time() - last_ftmo_log >= ftmo_log_interval:
+                    log_ftmo_status(equity_now, ftmo_state, ftmo_guardian, running_max_equity)
+                    last_ftmo_log = time.time()
 
-            if state == "CUTOFF":
-                # This is the key “extra”: stay alive, but do nothing new late-session.
-                logger.info(
-                    "🟠 Cutoff window active (no new trades). Sleeping %ss...", check_interval
-                )
-                time.sleep(check_interval)
-                continue
+            logger.info("Iteration %d - checking signals...", iteration)
 
-            # ACTIVE
-            check_for_signals(
-                symbol=symbol,
-                risk_pct=risk_pct,
-                regime_filter=regime_filter,
-                chop_threshold=chop_threshold,
-                stop_buffer=stop_buffer,
+            # Check for signals
+            check_for_signals_with_ftmo(
+                symbol=strategy_config.symbol,
+                strategy_config=strategy_config,
                 ftmo_guardian=ftmo_guardian,
-                telegram_bot=telegram_bot,
-                debug_logger=debug_logger,
+                ftmo_state=ftmo_state,
+                running_max_equity=running_max_equity,
             )
 
-            logger.info("💤 Sleeping %ss...", check_interval)
+            logger.info("💤 Sleeping %ds...", check_interval)
             time.sleep(check_interval)
 
     except KeyboardInterrupt:
         logger.info("⛔ Monitor stopped by user")
-        telegram_bot.send_message("⛔ <b>Brooks Live Monitor Stopped</b>")
     except Exception as e:
         logger.error("❌ Monitor crashed: %s", e, exc_info=True)
-        telegram_bot.send_error(f"Monitor crashed: {str(e)}")
-
-
-def _setup_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Brooks Live Signal Monitor (manual execution)")
-    parser.add_argument("--symbol", default="US500.cash")
-    parser.add_argument("--risk-pct", type=float, default=0.5)
-    parser.add_argument("--regime-filter", action="store_true")
-    parser.add_argument("--chop-threshold", type=float, default=2.0)
-    parser.add_argument("--stop-buffer", type=float, default=1.0)
-    parser.add_argument("--interval", type=int, default=30, help="Seconds between checks")
-    parser.add_argument(
-        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
-    )
-
-    # Session config overrides
-    parser.add_argument("--session-start", default="09:30")
-    parser.add_argument("--session-end", default="16:00")
-    parser.add_argument("--trade-cutoff", default="15:30", help="No new trades after this ET time")
-
-    # FTMO
-    parser.add_argument("--ftmo-protection", action="store_true", default=False)
-    parser.add_argument("--ftmo-account-size", type=int, default=10000, choices=[10000, 25000])
+    parser = argparse.ArgumentParser(description="Brooks Live Monitor with FTMO Protection")
+    parser.add_argument("--strategy", default="config/strategies/us500_sniper.yaml")
+    parser.add_argument("--env", default="config/environments/production.yaml")
+    parser.add_argument("--interval", type=int, default=30)
+    parser.add_argument("--log-level", default="INFO")
 
     args = parser.parse_args()
-    _setup_logging(args.log_level)
 
-    cfg = SessionConfig(
-        session_start=args.session_start,
-        session_end=args.session_end,
-        trade_cutoff=args.trade_cutoff,
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    logger.info("=" * 60)
-    logger.info("🤖 BROOKS LIVE MONITOR STARTING")
-    logger.info("=" * 60)
-    logger.info("Symbol           : %s", args.symbol)
-    logger.info("Risk per trade   : %s%%", args.risk_pct)
-    logger.info("Regime filter    : %s", "ENABLED" if args.regime_filter else "DISABLED")
-    logger.info("Chop threshold   : %s", args.chop_threshold)
-    logger.info("Stop buffer      : %s", args.stop_buffer)
-    logger.info("Check interval   : %ss", args.interval)
-    logger.info("NY Session hours : %s-%s ET", cfg.session_start, cfg.session_end)
-    logger.info("No-new-trades    : after %s ET", cfg.trade_cutoff)
-    logger.info("FTMO Protection  : %s", "ENABLED" if args.ftmo_protection else "DISABLED")
-    logger.info("=" * 60)
-
     run_monitor(
-        symbol=args.symbol,
-        risk_pct=args.risk_pct,
-        regime_filter=args.regime_filter,
-        chop_threshold=args.chop_threshold,
-        stop_buffer=args.stop_buffer,
+        strategy_config_path=args.strategy,
+        env_config_path=args.env,
         check_interval=args.interval,
-        enable_ftmo_protection=args.ftmo_protection,
-        ftmo_account_size=args.ftmo_account_size,
-        cfg=cfg,
     )
     return 0
 
