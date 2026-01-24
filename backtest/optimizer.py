@@ -21,7 +21,7 @@ def start_optimization():
     """Run basic parameter grid search"""
     # --- CONFIGURATIE ---
     SYMBOL = "US500.cash"
-    DAYS = 60
+    DAYS = 340
     COSTS = 0.04
 
     # --- DE PARAMETER GRID ---
@@ -69,7 +69,9 @@ def start_optimization():
         if "error" not in res and res.get("trades", 0) > 0:
             row = {**params, **res}
             all_results.append(row)
-            print(f" ✓ Sharpe={res.get('daily_sharpe_r', 0):.3f}, Net={res.get('net_r', 0):.1f}R")
+            print(
+                f" ✓ Sharpe={res.get('daily_sharpe_r', 0):.3f}, Net={res.get('net_r', 0):.1f}R"
+            )
         else:
             print(" ✗ Failed")
 
