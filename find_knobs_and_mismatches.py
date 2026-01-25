@@ -1,6 +1,8 @@
-# Script: find_knobs_and_mismatches.py
-# Module: tools.find_knobs_and_mismatches
-# Location: tools/find_knobs_and_mismatches.py
+# find_knobs_and_mismatches.py
+"""
+FIXED: Correct import path for StrategyConfig
+Analyzes CLI args vs StrategyConfig schema
+"""
 
 from __future__ import annotations
 
@@ -112,7 +114,7 @@ class Visitor(ast.NodeVisitor):
                 if kw.arg == "dest" and isinstance(val, str):
                     dest = val
 
-            # Infer dest from last long flag (argparse behavior is more complex, but good enough)
+            # Infer dest from last long flag
             if dest is None:
                 long_flags = [f for f in flags if isinstance(f, str) and f.startswith("--")]
                 if long_flags:
@@ -169,17 +171,28 @@ class Visitor(ast.NodeVisitor):
 
 def _load_schema_fields(repo_root: str) -> set[str]:
     """
-    Loads StrategyConfig fields if available. If import fails, returns empty set.
+    FIXED: Load StrategyConfig from correct path
     """
     try:
         import sys
 
         sys.path.insert(0, repo_root)
-        from trading_framework.config.schema import StrategyConfig  # type: ignore
 
-        fields = set(StrategyConfig.model_fields.keys())
-        return fields
-    except Exception:
+        # FIX: Correct import path
+        # Get all fields from StrategyConfig
+        import dataclasses
+
+        from strategies.config import StrategyConfig
+
+        if dataclasses.is_dataclass(StrategyConfig):
+            fields = set(f.name for f in dataclasses.fields(StrategyConfig))
+            return fields
+        else:
+            # Fallback: get from __annotations__
+            return set(StrategyConfig.__annotations__.keys())
+
+    except Exception as e:
+        print(f"âš ï¸  Warning: Could not load StrategyConfig schema: {e}")
         return set()
 
 
@@ -189,14 +202,19 @@ def main() -> int:
     ap.add_argument("--json", default="knobs_and_mismatches.json")
     ap.add_argument(
         "--exclude",
-        default=".venv,.git,__pycache__,.pytest_cache,.mypy_cache,_export,_llm_export,outputs,logs",
+        default=".venv,.git,__pycache__,.pytest_cache,.mypy_cache,_export,_llm_export,outputs,logs,backtest_png",
     )
     args = ap.parse_args()
 
     root = os.path.abspath(args.root)
     exclude_dirs = tuple(d.strip() for d in args.exclude.split(",") if d.strip())
 
+    print(f"Scanning repo: {root}")
+    print(f"Excluding: {', '.join(exclude_dirs)}")
+    print()
+
     files = _iter_py_files(root, exclude_dirs)
+    print(f"Found {len(files)} Python files")
 
     all_cli: list[CliArg] = []
     all_reads: list[ArgsReadUsage] = []
@@ -209,7 +227,8 @@ def main() -> int:
             v.visit(tree)
             all_cli.extend(v.cli_args)
             all_reads.extend(v.args_reads)
-        except Exception:
+        except Exception as e:
+            print(f"âš ï¸  Skipped {fp}: {e}")
             continue
 
     cli_dests = {c.dest for c in all_cli if c.dest}
@@ -218,7 +237,9 @@ def main() -> int:
     cli_not_read = sorted([d for d in cli_dests if d not in read_names])
     read_not_cli = sorted([n for n in read_names if n not in cli_dests])
 
+    # FIXED: Load schema with correct import
     schema_fields = _load_schema_fields(root)
+
     not_in_schema = sorted(
         [n for n in (cli_dests | read_names) if schema_fields and n not in schema_fields]
     )
@@ -252,11 +273,34 @@ def main() -> int:
     print(
         f"CLI dests: {len(cli_dests)} | args reads: {len(read_names)} | schema fields: {len(schema_fields)}"
     )
-    print(f"CLI exists but not read: {len(cli_not_read)}")
-    print(f"Read but no CLI: {len(read_not_cli)}")
-    print(f"Names not in StrategyConfig schema: {len(not_in_schema)}")
-    print(f"Schema fields not referenced by CLI/args: {len(schema_not_referenced)}")
-    print(f"\nWrote: {os.path.abspath(args.json)}")
+    print()
+
+    print(f"âš ï¸  CLI exists but not read: {len(cli_not_read)}")
+    if cli_not_read:
+        for name in cli_not_read:
+            print(f"    - {name}")
+
+    print()
+    print(f"âš ï¸  Read but no CLI: {len(read_not_cli)}")
+    if read_not_cli:
+        for name in read_not_cli:
+            print(f"    - {name}")
+
+    print()
+    print(f"âš ï¸  Names not in StrategyConfig schema: {len(not_in_schema)}")
+    if not_in_schema:
+        for name in not_in_schema:
+            print(f"    - {name}")
+
+    print()
+    print(f"âš ï¸  Schema fields not referenced by CLI/args: {len(schema_not_referenced)}")
+    if schema_not_referenced:
+        for name in schema_not_referenced:
+            print(f"    - {name}")
+
+    print()
+    print(f"âœ… Wrote: {os.path.abspath(args.json)}")
+    print("=" * 100)
 
     return 0
 
