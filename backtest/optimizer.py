@@ -107,9 +107,7 @@ def start_optimization():
             # Regime (can be overridden)
             regime_filter=params.get("regime_filter", base.regime_filter),
             regime_params=RegimeParams(
-                chop_threshold=params.get(
-                    "chop_threshold", base.regime_params.chop_threshold
-                ),
+                chop_threshold=params.get("chop_threshold", base.regime_params.chop_threshold),
                 atr_period=base.regime_params.atr_period,
                 range_period=base.regime_params.range_period,
             ),
@@ -120,9 +118,7 @@ def start_optimization():
             ),
             # H2/L2 (can be overridden)
             h2l2_params=H2L2Params(
-                pullback_bars=params.get(
-                    "pullback_bars", base.h2l2_params.pullback_bars
-                ),
+                pullback_bars=params.get("pullback_bars", base.h2l2_params.pullback_bars),
                 signal_close_frac=params.get(
                     "signal_close_frac", base.h2l2_params.signal_close_frac
                 ),
@@ -130,9 +126,7 @@ def start_optimization():
                     "min_risk_price_units", base.h2l2_params.min_risk_price_units
                 ),
                 stop_buffer=params.get("stop_buffer", base.h2l2_params.stop_buffer),
-                cooldown_bars=params.get(
-                    "cooldown_bars", base.h2l2_params.cooldown_bars
-                ),
+                cooldown_bars=params.get("cooldown_bars", base.h2l2_params.cooldown_bars),
             ),
             # Guardrails (can be overridden)
             guardrails=Guardrails(
@@ -173,9 +167,7 @@ def start_optimization():
             trades = res.get("trades", 0)
             wr = res.get("winrate", 0) * 100
 
-            print(
-                f" ✓ Sharpe={sharpe:.3f}, Net={net_r:+.1f}R, Trades={trades}, WR={wr:.1f}%"
-            )
+            print(f" ✓ Sharpe={sharpe:.3f}, Net={net_r:+.1f}R, Trades={trades}, WR={wr:.1f}%")
         else:
             error_msg = res.get("error", "Unknown error")
             print(f" ✗ {error_msg}")
