@@ -48,7 +48,9 @@ _log.getLogger("execution.selection").setLevel(_log.WARNING)
 
 from execution.selection import select_top_per_ny_day
 
+from backtest.config_formatter import format_frozen_config_text
 from backtest.visualiser import generate_performance_report
+from backtest.visualiser_v2 import generate_dashboard_v2
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("Backtest")
@@ -876,19 +878,21 @@ def run_backtest_from_config(
     stats["pf_short"] = pf_short
     stats["net_r_short"] = net_short
 
-    generate_performance_report(
+    # Generate Dashboard V2 (audit-proof)
+    generate_dashboard_v2(
         results_r=res,
         equity_curve=equity_curve,
         drawdown=drawdown,
+        daily_pnl_r=daily_pnl_r,
+        trades_df=trades_df,
+        config=config,
         symbol=symbol,
         days=actual_cal_days,
         run_id=run_id,
-        command=f"Config: {config.get_hash()} | Period: {start_str} to {end_str}",
         period_start=period_start,
         period_end=period_end,
         stats=stats,
         price_series=price_series,
-        daily_pnl=daily_pnl_r,
     )
 
     # After generating standard report, add risk analysis
@@ -1002,6 +1006,10 @@ def main() -> int:
     # Load config
     logger.info("Loading config from: %s", args.config)
     config = StrategyConfig.load(args.config)
+
+    # Log frozen config for drift checking
+    config_text = format_frozen_config_text(config)
+    logger.info("\n" + config_text)
 
     # Apply CLI overrides
     if args.max_trades_day:
