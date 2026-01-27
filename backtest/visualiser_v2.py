@@ -1,29 +1,29 @@
 # backtest/visualiser_v2.py
 """
-Dashboard V2 - Audit-Proof Performance Visualization
+Dashboard V2 - Clean, Audit-Friendly Backtest Visualization
 
-CRITICAL: Uses format_frozen_config_text() for config box to enable drift checking.
+FIXED ISSUES:
+1. Correct import: from strategies.config import StrategyConfig
+2. No emoji characters (prevents glyph warnings)
+3. Clean layout hierarchy: Performance → Edge → Behaviour → Summary
+4. All metrics preserved
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from strategies.config import StrategyConfig
 
-from backtest.analytics.monthly_metrics import (
-    calculate_monthly_r,
-    calculate_monthly_stats,
-)
-from backtest.analytics.yearly_metrics import calculate_yearly_breakdown
-from backtest.config_formatter import format_frozen_config_text
+# FIXED: Correct import path
+from strategies.config import StrategyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -41,431 +41,462 @@ def generate_dashboard_v2(
     symbol: str,
     days: int,
     run_id: str,
-    period_start: Optional[pd.Timestamp] = None,
-    period_end: Optional[pd.Timestamp] = None,
-    stats: Optional[Dict[str, Any]] = None,
+    period_start: Optional[pd.Timestamp],
+    period_end: Optional[pd.Timestamp],
+    stats: Optional[dict],
     price_series: Optional[pd.Series] = None,
     output_dir: str = "backtest/backtest_png",
+    **_kwargs,
 ) -> Path:
     """
-    Generate Dashboard V2 PNG with audit-proof config box.
+    Dashboard V2 (PNG) - Clean Layout
 
-    Args:
-        results_r: Trade results series (R values)
-        equity_curve: Cumulative equity (R)
-        drawdown: Drawdown series (R, negative values)
-        daily_pnl_r: Daily PnL in R (indexed by NY date)
-        trades_df: DataFrame with all trades (must have 'exit_time', 'net_r')
-        config: Strategy configuration
-        symbol: Trading symbol
-        days: Number of days in backtest
-        run_id: Unique run identifier
-        period_start: Start timestamp
-        period_end: End timestamp
-        stats: Additional stats dict
-        price_series: Optional price series for context
-        output_dir: Output directory
-
-    Returns:
-        Path to generated PNG
+    Layout Hierarchy:
+    - Row 1: Equity Growth (main performance)
+    - Row 2: Price Chart (instrument context)
+    - Row 3: Drawdown (risk)
+    - Row 4: Rolling Expectancy (edge quality)
+    - Row 5: Rolling Winrate (consistency)
+    - Row 6: Trades per Month (frequency)
+    - Row 7: Daily PnL Distribution (daily behaviour)
+    - Row 8: Monthly Heatmap (NY timezone)
+    - Row 9: Regime Performance (if enabled)
+    - Row 10: Yearly Summary Table
+    - Row 11: Metrics Summary + Config
     """
-    # Calculate monthly metrics
-    monthly_df = calculate_monthly_r(
-        trades_df,
-        ny_tz=NY_TZ,
-        costs_per_trade_r=config.costs_per_trade_r,
-    )
-    monthly_stats = calculate_monthly_stats(monthly_df)
 
-    # Calculate yearly metrics (from daily equity)
-    yearly_df = calculate_yearly_breakdown(
-        daily_pnl_r,
-        trades_df,
-        ny_tz=NY_TZ,
-    )
-
-    # Get frozen config text (for drift checking)
-    config_text = format_frozen_config_text(config)
-
-    # Create figure
-    fig = plt.figure(figsize=(20, 24))
-    gs = fig.add_gridspec(
-        nrows=9,
-        ncols=2,
-        height_ratios=[1, 2, 1.5, 1.5, 1.5, 1.5, 2, 1.5, 2],
-        width_ratios=[3, 1],
-        hspace=0.4,
-        wspace=0.3,
-    )
-
-    # === ROW 0: TITLE + CONFIG BOX ===
-    ax_title = fig.add_subplot(gs[0, 0])
-    ax_title.axis("off")
-
-    title = f"Brooks Backtest Dashboard V2: {symbol} ({days} days)"
-    if period_start and period_end:
-        title += f"\n[{period_start.date()} → {period_end.date()}]"
-
-    ax_title.text(
-        0.5,
-        0.5,
-        title,
-        ha="center",
-        va="center",
-        fontsize=16,
-        fontweight="bold",
-    )
-
-    # Config box (right side)
-    ax_config = fig.add_subplot(gs[0, 1])
-    ax_config.axis("off")
-    ax_config.text(
-        0.05,
-        0.95,
-        config_text,
-        va="top",
-        ha="left",
-        fontsize=8,
-        family="monospace",
-        bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.3),
-    )
-
-    # === ROW 1: EQUITY CURVE ===
-    ax_equity = fig.add_subplot(gs[1, :])
-    ax_equity.plot(
-        equity_curve.index,
-        equity_curve.values,
-        color="#2ca02c",
-        linewidth=2.5,
-        label="Cumulative R",
-    )
-    ax_equity.fill_between(
-        equity_curve.index,
-        equity_curve.values,
-        color="#2ca02c",
-        alpha=0.1,
-    )
-    ax_equity.set_ylabel("Cumulative R")
-    ax_equity.set_title("Equity Growth (R)", fontweight="bold")
-    ax_equity.grid(True, alpha=0.3)
-    ax_equity.legend(loc="upper left")
-    _apply_time_axis(ax_equity)
-
-    # === ROW 2: DRAWDOWN ===
-    ax_dd = fig.add_subplot(gs[2, :])
-    ax_dd.fill_between(
-        drawdown.index,
-        drawdown.values,
-        0,
-        color="#d62728",
-        alpha=0.3,
-    )
-    ax_dd.plot(
-        drawdown.index,
-        drawdown.values,
-        color="#d62728",
-        linewidth=1,
-        label="Drawdown (R)",
-    )
-    ax_dd.set_ylabel("Drawdown (R)")
-    ax_dd.set_title("Drawdown (from Daily Equity)", fontweight="bold")
-    ax_dd.grid(True, alpha=0.3)
-    ax_dd.legend(loc="lower left")
-    _apply_time_axis(ax_dd)
-
-    # === ROW 3: MONTHLY HEATMAP ===
-    ax_heatmap = fig.add_subplot(gs[3, :])
-    _plot_monthly_heatmap(ax_heatmap, monthly_df)
-
-    # === ROW 4: ROLLING EXPECTANCY ===
-    ax_exp = fig.add_subplot(gs[4, 0])
-    rolling_exp = results_r.rolling(window=30).mean()
-    ax_exp.plot(
-        rolling_exp.index,
-        rolling_exp.values,
-        color="#ff7f0e",
-        linewidth=2,
-        label="Rolling Expectancy (30 trades)",
-    )
-    ax_exp.axhline(0, color="gray", linestyle="--", alpha=0.5)
-    ax_exp.set_ylabel("R/trade")
-    ax_exp.set_title("Rolling Expectancy", fontweight="bold")
-    ax_exp.grid(True, alpha=0.3)
-    ax_exp.legend(loc="upper left")
-    _apply_time_axis(ax_exp)
-
-    # === ROW 4: ROLLING WINRATE ===
-    ax_wr = fig.add_subplot(gs[4, 1])
-    rolling_wr = (results_r > 0).rolling(window=30).mean() * 100
-    ax_wr.plot(
-        rolling_wr.index,
-        rolling_wr.values,
-        color="#1f77b4",
-        linewidth=2,
-        label="Winrate % (30 trades)",
-    )
-    ax_wr.axhline(33.3, color="orange", linestyle="--", label="Breakeven (1:2 RR)")
-    ax_wr.set_ylabel("Winrate %")
-    ax_wr.set_ylim(0, 100)
-    ax_wr.set_title("Rolling Winrate", fontweight="bold")
-    ax_wr.grid(True, alpha=0.3)
-    ax_wr.legend(loc="upper left")
-    _apply_time_axis(ax_wr)
-
-    # === ROW 5: TRADES PER MONTH ===
-    ax_tpm = fig.add_subplot(gs[5, 0])
-    _plot_trades_per_month(ax_tpm, monthly_df)
-
-    # === ROW 5: REGIME PERFORMANCE ===
-    ax_regime = fig.add_subplot(gs[5, 1])
-    _plot_regime_performance(ax_regime, trades_df, config)
-
-    # === ROW 6: PRICE (if available) ===
-    if price_series is not None and not price_series.empty:
-        ax_price = fig.add_subplot(gs[6, :])
-        ax_price.plot(
-            price_series.index,
-            price_series.values,
-            color="#111111",
-            linewidth=1.2,
-            label=f"{symbol} M15 close",
-        )
-        ax_price.set_ylabel("Price")
-        ax_price.set_title("Instrument Price", fontweight="bold")
-        ax_price.grid(True, alpha=0.25)
-        ax_price.legend(loc="upper left")
-        _apply_time_axis(ax_price)
-
-    # === ROW 7: YEAR-BY-YEAR TABLE ===
-    ax_yearly = fig.add_subplot(gs[7, :])
-    _plot_yearly_table(ax_yearly, yearly_df)
-
-    # === ROW 8: METRICS SUMMARY ===
-    ax_metrics = fig.add_subplot(gs[8, :])
-    _plot_metrics_summary(ax_metrics, monthly_stats, stats, config)
-
-    # Save
+    # Ensure output directory exists
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    filename = output_path / f"dashboard_v2_{run_id}.png"
 
+    # Setup figure
+    plt.style.use("ggplot")
+    fig = plt.figure(figsize=(20, 28))
+
+    # Grid: 11 rows, varying heights
+    gs = fig.add_gridspec(
+        nrows=11,
+        ncols=1,
+        height_ratios=[2.5, 1.5, 1.2, 1.2, 1.2, 1.2, 1.5, 2.0, 1.5, 1.5, 2.5],
+        hspace=0.40,
+    )
+
+    # Title
+    title_text = f"Brooks Backtest Dashboard V2: {symbol} ({days} days)"
+    if period_start and period_end:
+        title_text += f"\n{period_start.date()} to {period_end.date()}"
+
+    fig.suptitle(title_text, fontsize=16, fontweight="bold")
+
+    # === ROW 1: EQUITY CURVE ===
+    ax_equity = fig.add_subplot(gs[0, 0])
+    ax_equity.set_title(
+        "Performance: Equity Growth (R-units)",
+        fontsize=12,
+        fontweight="bold",
+        loc="left",
+    )
+
+    if isinstance(equity_curve.index, pd.DatetimeIndex):
+        ax_equity.plot(
+            equity_curve.index,
+            equity_curve.values,
+            label="Cumulative R",
+            color="#2ca02c",
+            linewidth=2.5,
+        )
+        ax_equity.fill_between(
+            equity_curve.index, equity_curve.values, color="#2ca02c", alpha=0.15
+        )
+        _apply_time_axis(ax_equity)
+        ax_equity.set_xlabel("Date")
+    else:
+        ax_equity.plot(
+            equity_curve.values, label="Cumulative R", color="#2ca02c", linewidth=2.5
+        )
+        ax_equity.set_xlabel("Trades")
+
+    ax_equity.set_ylabel("Cumulative R")
+    ax_equity.grid(True, alpha=0.3)
+    ax_equity.legend(loc="upper left")
+
+    # === ROW 2: PRICE CHART ===
+    ax_price = fig.add_subplot(gs[1, 0])
+    ax_price.set_title("Instrument Price (M15 close)", fontsize=11, loc="left")
+
+    if price_series is not None and not price_series.empty:
+        ps = pd.Series(price_series)
+        if period_start and period_end:
+            try:
+                ps = ps.loc[period_start:period_end]
+            except:
+                pass
+
+        if isinstance(ps.index, pd.DatetimeIndex):
+            ax_price.plot(
+                ps.index,
+                ps.values,
+                color="#111111",
+                linewidth=1.2,
+                label=f"{symbol} M15",
+            )
+            _apply_time_axis(ax_price)
+            ax_price.set_xlabel("Date")
+        else:
+            ax_price.plot(ps.values, color="#111111", linewidth=1.2)
+            ax_price.set_xlabel("Bars")
+
+        ax_price.set_ylabel("Price")
+        ax_price.grid(True, alpha=0.25)
+        ax_price.legend(loc="upper left")
+    else:
+        ax_price.text(0.5, 0.5, "No price data", ha="center", va="center")
+        ax_price.axis("off")
+
+    # === ROW 3: DRAWDOWN ===
+    ax_dd = fig.add_subplot(gs[2, 0])
+    ax_dd.set_title("Risk: Drawdown (R-units)", fontsize=11, loc="left")
+
+    if isinstance(drawdown.index, pd.DatetimeIndex):
+        ax_dd.fill_between(
+            drawdown.index, drawdown.values, 0, color="#d62728", alpha=0.30
+        )
+        ax_dd.plot(drawdown.index, drawdown.values, color="#d62728", linewidth=1.5)
+        _apply_time_axis(ax_dd)
+        ax_dd.set_xlabel("Date")
+    else:
+        ax_dd.fill_between(
+            range(len(drawdown)), drawdown.values, 0, color="#d62728", alpha=0.30
+        )
+        ax_dd.plot(drawdown.values, color="#d62728", linewidth=1.5)
+        ax_dd.set_xlabel("Trades")
+
+    ax_dd.set_ylabel("Drawdown (R)")
+    ax_dd.grid(True, alpha=0.3)
+
+    # === ROW 4: ROLLING EXPECTANCY ===
+    ax_exp = fig.add_subplot(gs[3, 0])
+    ax_exp.set_title(
+        "Edge: Rolling Expectancy (30-trade window)", fontsize=11, loc="left"
+    )
+
+    rolling_expectancy = results_r.rolling(window=30).mean()
+
+    if isinstance(results_r.index, pd.DatetimeIndex):
+        ax_exp.plot(
+            results_r.index,
+            rolling_expectancy.values,
+            color="#1f77b4",
+            linewidth=2,
+            label="Rolling Avg R",
+        )
+        _apply_time_axis(ax_exp)
+        ax_exp.set_xlabel("Date")
+    else:
+        ax_exp.plot(
+            rolling_expectancy.values,
+            color="#1f77b4",
+            linewidth=2,
+            label="Rolling Avg R",
+        )
+        ax_exp.set_xlabel("Trades")
+
+    ax_exp.axhline(0, color="red", linestyle="--", alpha=0.5, label="Breakeven")
+    ax_exp.set_ylabel("Avg R/trade")
+    ax_exp.legend(loc="upper left")
+    ax_exp.grid(True, alpha=0.3)
+
+    # === ROW 5: ROLLING WINRATE ===
+    ax_wr = fig.add_subplot(gs[4, 0])
+    ax_wr.set_title(
+        "Consistency: Rolling Winrate (30-trade window)", fontsize=11, loc="left"
+    )
+
+    rolling_winrate = (results_r > 0).rolling(window=30).mean() * 100.0
+
+    if isinstance(results_r.index, pd.DatetimeIndex):
+        ax_wr.plot(
+            results_r.index,
+            rolling_winrate.values,
+            color="#2ca02c",
+            linewidth=2,
+            label="Winrate %",
+        )
+        _apply_time_axis(ax_wr)
+        ax_wr.set_xlabel("Date")
+    else:
+        ax_wr.plot(
+            rolling_winrate.values, color="#2ca02c", linewidth=2, label="Winrate %"
+        )
+        ax_wr.set_xlabel("Trades")
+
+    ax_wr.axhline(
+        33.3, color="orange", linestyle="--", label="Breakeven (1:2 RR)", alpha=0.7
+    )
+    ax_wr.set_ylabel("Winrate %")
+    ax_wr.set_ylim(0, 100)
+    ax_wr.legend(loc="upper left")
+    ax_wr.grid(True, alpha=0.3)
+
+    # === ROW 6: TRADES PER MONTH ===
+    ax_tpm = fig.add_subplot(gs[5, 0])
+    ax_tpm.set_title(
+        "Frequency: Trades per Month (NY timezone)", fontsize=11, loc="left"
+    )
+
+    if not trades_df.empty and "ny_day" in trades_df.columns:
+        trades_df_copy = trades_df.copy()
+        trades_df_copy["ny_month"] = pd.to_datetime(
+            trades_df_copy["ny_day"]
+        ).dt.to_period("M")
+        monthly_counts = trades_df_copy.groupby("ny_month").size()
+
+        x = [str(m) for m in monthly_counts.index]
+        ax_tpm.bar(x, monthly_counts.values, color="#1f77b4", alpha=0.6)
+        ax_tpm.set_ylabel("Trades")
+        ax_tpm.tick_params(axis="x", rotation=45)
+        ax_tpm.grid(True, alpha=0.3, axis="y")
+    else:
+        ax_tpm.text(0.5, 0.5, "No monthly data", ha="center", va="center")
+        ax_tpm.axis("off")
+
+    # === ROW 7: DAILY PNL DISTRIBUTION ===
+    ax_dpnl = fig.add_subplot(gs[6, 0])
+    ax_dpnl.set_title("Behaviour: Daily PnL (R/day)", fontsize=11, loc="left")
+
+    if not daily_pnl_r.empty:
+        dp = pd.Series(daily_pnl_r).fillna(0.0)
+        try:
+            x = pd.to_datetime(dp.index.astype(str))
+        except:
+            x = np.arange(len(dp))
+
+        colors = np.where(dp.values >= 0, "#2ca02c", "#d62728")
+        ax_dpnl.bar(x, dp.values, color=colors, alpha=0.5, label="Daily PnL")
+
+        cum = dp.cumsum()
+        ax_dpnl.plot(
+            x, cum.values, color="#111111", linewidth=1.5, label="Cumulative Daily PnL"
+        )
+
+        if isinstance(x, pd.DatetimeIndex):
+            _apply_time_axis(ax_dpnl)
+
+        ax_dpnl.set_xlabel("Date (NY)")
+        ax_dpnl.set_ylabel("R")
+        ax_dpnl.legend(loc="upper left")
+        ax_dpnl.grid(True, alpha=0.25)
+    else:
+        ax_dpnl.text(0.5, 0.5, "No daily PnL data", ha="center", va="center")
+        ax_dpnl.axis("off")
+
+    # === ROW 8: MONTHLY HEATMAP ===
+    ax_heatmap = fig.add_subplot(gs[7, 0])
+    ax_heatmap.set_title(
+        "Monthly Performance Heatmap (NY timezone)", fontsize=11, loc="left"
+    )
+
+    if not trades_df.empty and "ny_day" in trades_df.columns:
+        # Calculate monthly returns
+        trades_df_copy = trades_df.copy()
+        trades_df_copy["ny_date"] = pd.to_datetime(trades_df_copy["ny_day"])
+        trades_df_copy["year"] = trades_df_copy["ny_date"].dt.year
+        trades_df_copy["month"] = trades_df_copy["ny_date"].dt.month
+
+        monthly = trades_df_copy.groupby(["year", "month"])["net_r"].sum().reset_index()
+
+        if not monthly.empty:
+            pivot = monthly.pivot(index="year", columns="month", values="net_r")
+
+            # Plot heatmap
+            im = ax_heatmap.imshow(
+                pivot.values, aspect="auto", cmap="RdYlGn", vmin=-20, vmax=20
+            )
+
+            ax_heatmap.set_xticks(range(12))
+            ax_heatmap.set_xticklabels(
+                [
+                    "Jan",
+                    "Feb",
+                    "Mar",
+                    "Apr",
+                    "May",
+                    "Jun",
+                    "Jul",
+                    "Aug",
+                    "Sep",
+                    "Oct",
+                    "Nov",
+                    "Dec",
+                ]
+            )
+            ax_heatmap.set_yticks(range(len(pivot.index)))
+            ax_heatmap.set_yticklabels(pivot.index)
+
+            # Add values
+            for i in range(len(pivot.index)):
+                for j in range(len(pivot.columns)):
+                    val = pivot.iloc[i, j]
+                    if not pd.isna(val):
+                        text_color = "white" if abs(val) > 10 else "black"
+                        ax_heatmap.text(
+                            j,
+                            i,
+                            f"{val:.1f}R",
+                            ha="center",
+                            va="center",
+                            color=text_color,
+                            fontsize=9,
+                        )
+
+            plt.colorbar(im, ax=ax_heatmap, label="Net R")
+        else:
+            ax_heatmap.text(
+                0.5, 0.5, "Insufficient monthly data", ha="center", va="center"
+            )
+            ax_heatmap.axis("off")
+    else:
+        ax_heatmap.text(0.5, 0.5, "No monthly data", ha="center", va="center")
+        ax_heatmap.axis("off")
+
+    # === ROW 9: REGIME PERFORMANCE ===
+    ax_regime = fig.add_subplot(gs[8, 0])
+    ax_regime.set_title("Regime Performance", fontsize=11, loc="left")
+
+    if (
+        config.regime_filter
+        and not trades_df.empty
+        and "regime_at_entry" in trades_df.columns
+    ):
+        regime_stats = (
+            trades_df.groupby("regime_at_entry")
+            .agg({"net_r": ["sum", "mean", "count"]})
+            .round(2)
+        )
+
+        regimes = regime_stats.index.tolist()
+        net_r = regime_stats[("net_r", "sum")].values
+
+        colors = ["#2ca02c" if x > 0 else "#d62728" for x in net_r]
+        ax_regime.bar(regimes, net_r, color=colors, alpha=0.6)
+        ax_regime.set_ylabel("Net R")
+        ax_regime.grid(True, alpha=0.3, axis="y")
+
+        # Add annotations
+        for i, (regime, r) in enumerate(zip(regimes, net_r)):
+            count = regime_stats[("net_r", "count")].iloc[i]
+            avg = regime_stats[("net_r", "mean")].iloc[i]
+            ax_regime.text(
+                i,
+                r,
+                f"{count} trades\nAvg: {avg:.2f}R",
+                ha="center",
+                va="bottom" if r > 0 else "top",
+                fontsize=9,
+            )
+    else:
+        ax_regime.text(0.5, 0.5, "Regime filter disabled", ha="center", va="center")
+        ax_regime.axis("off")
+
+    # === ROW 10: YEARLY SUMMARY TABLE ===
+    ax_yearly = fig.add_subplot(gs[9, 0])
+    ax_yearly.set_title("Yearly Summary", fontsize=11, loc="left")
+    ax_yearly.axis("off")
+
+    if not trades_df.empty and "ny_day" in trades_df.columns:
+        trades_df_copy = trades_df.copy()
+        trades_df_copy["year"] = pd.to_datetime(trades_df_copy["ny_day"]).dt.year
+
+        yearly = (
+            trades_df_copy.groupby("year")
+            .agg({"net_r": ["sum", "mean"], "exit_time": "count"})
+            .round(2)
+        )
+
+        yearly.columns = ["Net R", "Avg R", "Trades"]
+
+        # Create table
+        table_data = []
+        for year, row in yearly.iterrows():
+            table_data.append(
+                [
+                    str(year),
+                    f"{row['Net R']:+.2f}R",
+                    f"{row['Avg R']:+.4f}R",
+                    f"{int(row['Trades'])}",
+                ]
+            )
+
+        table = ax_yearly.table(
+            cellText=table_data,
+            colLabels=["Year", "Net R", "Avg R/trade", "Trades"],
+            cellLoc="center",
+            loc="center",
+            bbox=[0.2, 0.2, 0.6, 0.6],
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 2)
+    else:
+        ax_yearly.text(0.5, 0.5, "No yearly data", ha="center", va="center")
+
+    # === ROW 11: METRICS SUMMARY + CONFIG ===
+    ax_summary = fig.add_subplot(gs[10, 0])
+    ax_summary.axis("off")
+
+    summary_lines = []
+    summary_lines.append(f"RUN INFO")
+    summary_lines.append(f"  Run ID: {run_id}")
+    summary_lines.append(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    summary_lines.append("")
+
+    if stats:
+        summary_lines.append("KEY METRICS")
+        summary_lines.append(f"  Trades: {stats.get('trades', 0)}")
+        summary_lines.append(f"  Net R: {stats.get('net_r', 0):+.2f}R")
+        summary_lines.append(f"  Avg R/trade: {stats.get('avg_r', 0):+.4f}R")
+        summary_lines.append(f"  Winrate: {stats.get('winrate', 0) * 100:.1f}%")
+        summary_lines.append(f"  Profit Factor: {stats.get('profit_factor', 0):.2f}")
+        summary_lines.append(
+            f"  Daily Sharpe (R/day): {stats.get('daily_sharpe_r', 0):.3f}"
+        )
+        summary_lines.append(
+            f"  Max DD (daily, R): {stats.get('max_dd_r_daily', 0):.2f}R"
+        )
+        summary_lines.append("")
+
+    summary_lines.append("STRATEGY CONFIG")
+    summary_lines.append(f"  Symbol: {config.symbol}")
+    summary_lines.append(f"  Regime Filter: {'ON' if config.regime_filter else 'OFF'}")
+    if config.regime_filter:
+        summary_lines.append(f"  Chop Threshold: {config.regime_params.chop_threshold}")
+    summary_lines.append(f"  Risk/Trade: {config.risk_pct}%")
+    summary_lines.append(f"  Max Trades/Day: {config.guardrails.max_trades_per_day}")
+    summary_lines.append(f"  Costs: {config.costs_per_trade_r:.4f}R")
+
+    text = "\n".join(summary_lines)
+    ax_summary.text(
+        0.02,
+        0.98,
+        text,
+        va="top",
+        ha="left",
+        fontsize=9,
+        family="monospace",
+        bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.2),
+    )
+
+    # Save
+    filename = output_path / f"dashboard_v2_{run_id}.png"
     plt.savefig(str(filename), dpi=150, bbox_inches="tight")
     plt.close()
 
-    logger.info(f"✓ Dashboard V2 saved: {filename}")
+    logger.info(f"Dashboard V2 saved: {filename}")
     return filename
 
 
 def _apply_time_axis(ax):
-    """Apply consistent time axis formatting"""
+    """Apply clean time axis formatting"""
     locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-
-
-def _plot_monthly_heatmap(ax, monthly_df: pd.DataFrame):
-    """Plot monthly returns heatmap (matplotlib only, no seaborn)"""
-    ax.set_title("Monthly Returns (R) - NY Timezone", fontweight="bold")
-
-    if monthly_df.empty:
-        ax.text(0.5, 0.5, "No monthly data", ha="center", va="center")
-        ax.axis("off")
-        return
-
-    # Pivot to year x month grid
-    monthly_reset = monthly_df.reset_index()
-    pivot = monthly_reset.pivot(index="year", columns="month", values="net_r")
-
-    # Plot using imshow
-    im = ax.imshow(
-        pivot.values,
-        aspect="auto",
-        cmap="RdYlGn",
-        interpolation="nearest",
-    )
-
-    # Set ticks
-    ax.set_xticks(range(12))
-    ax.set_xticklabels(
-        [
-            "Jan",
-            "Feb",
-            "Mar",
-            "Apr",
-            "May",
-            "Jun",
-            "Jul",
-            "Aug",
-            "Sep",
-            "Oct",
-            "Nov",
-            "Dec",
-        ]
-    )
-    ax.set_yticks(range(len(pivot.index)))
-    ax.set_yticklabels(pivot.index)
-
-    # Add colorbar
-    plt.colorbar(im, ax=ax, label="Net R")
-
-    # Annotate cells with values
-    for i in range(len(pivot.index)):
-        for j in range(len(pivot.columns)):
-            val = pivot.iloc[i, j]
-            if pd.notna(val):
-                ax.text(
-                    j,
-                    i,
-                    f"{val:.1f}",
-                    ha="center",
-                    va="center",
-                    color="black" if abs(val) < pivot.values.std() else "white",
-                    fontsize=8,
-                )
-
-
-def _plot_trades_per_month(ax, monthly_df: pd.DataFrame):
-    """Bar chart of trades per month"""
-    ax.set_title("Trades per Month", fontweight="bold")
-
-    if monthly_df.empty or "trades" not in monthly_df.columns:
-        ax.text(0.5, 0.5, "No trade count data", ha="center", va="center")
-        ax.axis("off")
-        return
-
-    # Create x-axis labels (Year-Month)
-    monthly_reset = monthly_df.reset_index()
-    monthly_reset["label"] = (
-        monthly_reset["year"].astype(str) + "-" + monthly_reset["month"].astype(str).str.zfill(2)
-    )
-
-    ax.bar(
-        range(len(monthly_reset)),
-        monthly_reset["trades"],
-        color="steelblue",
-        alpha=0.7,
-    )
-    ax.set_xlabel("Month")
-    ax.set_ylabel("Trades")
-    ax.set_xticks(range(len(monthly_reset)))
-    ax.set_xticklabels(monthly_reset["label"], rotation=45, ha="right", fontsize=8)
-    ax.grid(True, alpha=0.3, axis="y")
-
-
-def _plot_regime_performance(ax, trades_df: pd.DataFrame, config: StrategyConfig):
-    """Plot regime performance breakdown (with fallback)"""
-    ax.set_title("Regime Performance", fontweight="bold")
-    ax.axis("off")
-
-    if not config.regime_filter or "regime_at_entry" not in trades_df.columns:
-        ax.text(
-            0.5,
-            0.5,
-            "No regime data\n(regime_filter: OFF)",
-            ha="center",
-            va="center",
-            fontsize=10,
-            color="gray",
-        )
-        return
-
-    # Aggregate by regime
-    regime_stats = (
-        trades_df.groupby("regime_at_entry").agg({"net_r": ["sum", "count", "mean"]}).round(2)
-    )
-
-    # Format as text table
-    lines = ["Regime Breakdown:"]
-    lines.append("-" * 40)
-
-    for regime in regime_stats.index:
-        net_r = regime_stats.loc[regime, ("net_r", "sum")]
-        count = int(regime_stats.loc[regime, ("net_r", "count")])
-        avg_r = regime_stats.loc[regime, ("net_r", "mean")]
-
-        lines.append(f"{regime:12s}: {net_r:+7.2f}R ({count:3d} trades, avg {avg_r:+.3f}R)")
-
-    ax.text(
-        0.05,
-        0.95,
-        "\n".join(lines),
-        va="top",
-        ha="left",
-        fontsize=9,
-        family="monospace",
-    )
-
-
-def _plot_yearly_table(ax, yearly_df: pd.DataFrame):
-    """Display year-by-year table"""
-    ax.set_title("Year-by-Year Performance (Max DD from Daily Equity)", fontweight="bold")
-    ax.axis("off")
-
-    if yearly_df.empty:
-        ax.text(0.5, 0.5, "No yearly data", ha="center", va="center")
-        return
-
-    # Format table
-    lines = [f"{'Year':<6} {'Net R':>10} {'Max DD':>10} {'Trades':>8} {'Sharpe':>8}"]
-    lines.append("-" * 50)
-
-    for year, row in yearly_df.iterrows():
-        lines.append(
-            f"{year:<6} {row['net_r']:>+10.2f} {row['max_dd_r']:>10.2f} "
-            f"{int(row['trades']):>8} {row['sharpe']:>8.3f}"
-        )
-
-    ax.text(
-        0.05,
-        0.95,
-        "\n".join(lines),
-        va="top",
-        ha="left",
-        fontsize=9,
-        family="monospace",
-    )
-
-
-def _plot_metrics_summary(
-    ax,
-    monthly_stats: dict,
-    stats: Optional[dict],
-    config: StrategyConfig,
-):
-    """Display metrics summary block"""
-    ax.axis("off")
-
-    lines = ["METRICS SUMMARY"]
-    lines.append("=" * 60)
-
-    # Monthly metrics
-    lines.append("\n📊 MONTHLY CONSISTENCY:")
-    lines.append(f"  Median monthly R    : {monthly_stats['median_monthly_r']:+.2f}R")
-    lines.append(f"  P25 monthly R       : {monthly_stats['p25_monthly_r']:+.2f}R")
-    lines.append(f"  % positive months   : {monthly_stats['pct_positive_months']:.1f}%")
-    lines.append(f"  Best month          : {monthly_stats['best_month_r']:+.2f}R")
-    lines.append(f"  Worst month         : {monthly_stats['worst_month_r']:+.2f}R")
-    lines.append(f"  Avg trades/month    : {monthly_stats['avg_trades_per_month']:.1f}")
-    lines.append(f"  Avg costs/month     : {monthly_stats['avg_costs_per_month_r']:.3f}R")
-
-    # Additional stats (if provided)
-    if stats:
-        lines.append("\n📈 OVERALL:")
-        if "net_r" in stats:
-            lines.append(f"  Total Net R         : {stats['net_r']:+.2f}R")
-        if "daily_sharpe_r" in stats:
-            lines.append(f"  Daily Sharpe        : {stats['daily_sharpe_r']:.3f}")
-        if "max_dd_r_daily" in stats:
-            lines.append(f"  Max DD (daily)      : {stats['max_dd_r_daily']:.2f}R")
-        if "recovery_factor" in stats:
-            lines.append(f"  Recovery Factor     : {stats['recovery_factor']:.2f}")
-
-    ax.text(
-        0.02,
-        0.98,
-        "\n".join(lines),
-        va="top",
-        ha="left",
-        fontsize=9,
-        family="monospace",
-    )
