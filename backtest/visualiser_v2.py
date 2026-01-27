@@ -105,15 +105,11 @@ def generate_dashboard_v2(
             color="#2ca02c",
             linewidth=2.5,
         )
-        ax_equity.fill_between(
-            equity_curve.index, equity_curve.values, color="#2ca02c", alpha=0.15
-        )
+        ax_equity.fill_between(equity_curve.index, equity_curve.values, color="#2ca02c", alpha=0.15)
         _apply_time_axis(ax_equity)
         ax_equity.set_xlabel("Date")
     else:
-        ax_equity.plot(
-            equity_curve.values, label="Cumulative R", color="#2ca02c", linewidth=2.5
-        )
+        ax_equity.plot(equity_curve.values, label="Cumulative R", color="#2ca02c", linewidth=2.5)
         ax_equity.set_xlabel("Trades")
 
     ax_equity.set_ylabel("Cumulative R")
@@ -158,16 +154,12 @@ def generate_dashboard_v2(
     ax_dd.set_title("Risk: Drawdown (R-units)", fontsize=11, loc="left")
 
     if isinstance(drawdown.index, pd.DatetimeIndex):
-        ax_dd.fill_between(
-            drawdown.index, drawdown.values, 0, color="#d62728", alpha=0.30
-        )
+        ax_dd.fill_between(drawdown.index, drawdown.values, 0, color="#d62728", alpha=0.30)
         ax_dd.plot(drawdown.index, drawdown.values, color="#d62728", linewidth=1.5)
         _apply_time_axis(ax_dd)
         ax_dd.set_xlabel("Date")
     else:
-        ax_dd.fill_between(
-            range(len(drawdown)), drawdown.values, 0, color="#d62728", alpha=0.30
-        )
+        ax_dd.fill_between(range(len(drawdown)), drawdown.values, 0, color="#d62728", alpha=0.30)
         ax_dd.plot(drawdown.values, color="#d62728", linewidth=1.5)
         ax_dd.set_xlabel("Trades")
 
@@ -176,9 +168,7 @@ def generate_dashboard_v2(
 
     # === ROW 4: ROLLING EXPECTANCY ===
     ax_exp = fig.add_subplot(gs[3, 0])
-    ax_exp.set_title(
-        "Edge: Rolling Expectancy (30-trade window)", fontsize=11, loc="left"
-    )
+    ax_exp.set_title("Edge: Rolling Expectancy (30-trade window)", fontsize=11, loc="left")
 
     rolling_expectancy = results_r.rolling(window=30).mean()
 
@@ -208,9 +198,7 @@ def generate_dashboard_v2(
 
     # === ROW 5: ROLLING WINRATE ===
     ax_wr = fig.add_subplot(gs[4, 0])
-    ax_wr.set_title(
-        "Consistency: Rolling Winrate (30-trade window)", fontsize=11, loc="left"
-    )
+    ax_wr.set_title("Consistency: Rolling Winrate (30-trade window)", fontsize=11, loc="left")
 
     rolling_winrate = (results_r > 0).rolling(window=30).mean() * 100.0
 
@@ -225,14 +213,10 @@ def generate_dashboard_v2(
         _apply_time_axis(ax_wr)
         ax_wr.set_xlabel("Date")
     else:
-        ax_wr.plot(
-            rolling_winrate.values, color="#2ca02c", linewidth=2, label="Winrate %"
-        )
+        ax_wr.plot(rolling_winrate.values, color="#2ca02c", linewidth=2, label="Winrate %")
         ax_wr.set_xlabel("Trades")
 
-    ax_wr.axhline(
-        33.3, color="orange", linestyle="--", label="Breakeven (1:2 RR)", alpha=0.7
-    )
+    ax_wr.axhline(33.3, color="orange", linestyle="--", label="Breakeven (1:2 RR)", alpha=0.7)
     ax_wr.set_ylabel("Winrate %")
     ax_wr.set_ylim(0, 100)
     ax_wr.legend(loc="upper left")
@@ -240,15 +224,11 @@ def generate_dashboard_v2(
 
     # === ROW 6: TRADES PER MONTH ===
     ax_tpm = fig.add_subplot(gs[5, 0])
-    ax_tpm.set_title(
-        "Frequency: Trades per Month (NY timezone)", fontsize=11, loc="left"
-    )
+    ax_tpm.set_title("Frequency: Trades per Month (NY timezone)", fontsize=11, loc="left")
 
     if not trades_df.empty and "ny_day" in trades_df.columns:
         trades_df_copy = trades_df.copy()
-        trades_df_copy["ny_month"] = pd.to_datetime(
-            trades_df_copy["ny_day"]
-        ).dt.to_period("M")
+        trades_df_copy["ny_month"] = pd.to_datetime(trades_df_copy["ny_day"]).dt.to_period("M")
         monthly_counts = trades_df_copy.groupby("ny_month").size()
 
         x = [str(m) for m in monthly_counts.index]
@@ -275,9 +255,7 @@ def generate_dashboard_v2(
         ax_dpnl.bar(x, dp.values, color=colors, alpha=0.5, label="Daily PnL")
 
         cum = dp.cumsum()
-        ax_dpnl.plot(
-            x, cum.values, color="#111111", linewidth=1.5, label="Cumulative Daily PnL"
-        )
+        ax_dpnl.plot(x, cum.values, color="#111111", linewidth=1.5, label="Cumulative Daily PnL")
 
         if isinstance(x, pd.DatetimeIndex):
             _apply_time_axis(ax_dpnl)
@@ -292,9 +270,7 @@ def generate_dashboard_v2(
 
     # === ROW 8: MONTHLY HEATMAP ===
     ax_heatmap = fig.add_subplot(gs[7, 0])
-    ax_heatmap.set_title(
-        "Monthly Performance Heatmap (NY timezone)", fontsize=11, loc="left"
-    )
+    ax_heatmap.set_title("Monthly Performance Heatmap (NY timezone)", fontsize=11, loc="left")
 
     if not trades_df.empty and "ny_day" in trades_df.columns:
         # Calculate monthly returns
@@ -309,9 +285,7 @@ def generate_dashboard_v2(
             pivot = monthly.pivot(index="year", columns="month", values="net_r")
 
             # Plot heatmap
-            im = ax_heatmap.imshow(
-                pivot.values, aspect="auto", cmap="RdYlGn", vmin=-20, vmax=20
-            )
+            im = ax_heatmap.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=-20, vmax=20)
 
             ax_heatmap.set_xticks(range(12))
             ax_heatmap.set_xticklabels(
@@ -351,9 +325,7 @@ def generate_dashboard_v2(
 
             plt.colorbar(im, ax=ax_heatmap, label="Net R")
         else:
-            ax_heatmap.text(
-                0.5, 0.5, "Insufficient monthly data", ha="center", va="center"
-            )
+            ax_heatmap.text(0.5, 0.5, "Insufficient monthly data", ha="center", va="center")
             ax_heatmap.axis("off")
     else:
         ax_heatmap.text(0.5, 0.5, "No monthly data", ha="center", va="center")
@@ -363,15 +335,9 @@ def generate_dashboard_v2(
     ax_regime = fig.add_subplot(gs[8, 0])
     ax_regime.set_title("Regime Performance", fontsize=11, loc="left")
 
-    if (
-        config.regime_filter
-        and not trades_df.empty
-        and "regime_at_entry" in trades_df.columns
-    ):
+    if config.regime_filter and not trades_df.empty and "regime_at_entry" in trades_df.columns:
         regime_stats = (
-            trades_df.groupby("regime_at_entry")
-            .agg({"net_r": ["sum", "mean", "count"]})
-            .round(2)
+            trades_df.groupby("regime_at_entry").agg({"net_r": ["sum", "mean", "count"]}).round(2)
         )
 
         regimes = regime_stats.index.tolist()
@@ -457,12 +423,8 @@ def generate_dashboard_v2(
         summary_lines.append(f"  Avg R/trade: {stats.get('avg_r', 0):+.4f}R")
         summary_lines.append(f"  Winrate: {stats.get('winrate', 0) * 100:.1f}%")
         summary_lines.append(f"  Profit Factor: {stats.get('profit_factor', 0):.2f}")
-        summary_lines.append(
-            f"  Daily Sharpe (R/day): {stats.get('daily_sharpe_r', 0):.3f}"
-        )
-        summary_lines.append(
-            f"  Max DD (daily, R): {stats.get('max_dd_r_daily', 0):.2f}R"
-        )
+        summary_lines.append(f"  Daily Sharpe (R/day): {stats.get('daily_sharpe_r', 0):.3f}")
+        summary_lines.append(f"  Max DD (daily, R): {stats.get('max_dd_r_daily', 0):.2f}R")
         summary_lines.append("")
 
     summary_lines.append("STRATEGY CONFIG")
