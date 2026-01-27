@@ -82,3 +82,4 @@ tools/knobs_and_mismatches.json
 
 # Legacy naming (optioneel als je hem verwijdert/verplaatst)
 main.py.LEGACY_DO_NOT_USE
+tests/outputs/
