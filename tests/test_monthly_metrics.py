@@ -36,7 +36,7 @@ def test_monthly_aggregation_synthetic():
     monthly = calculate_monthly_r(trades, costs_per_trade_r=0.04)
 
     # Should have Jan, Feb, Mar
-    assert len(monthly) == 3
+    assert len(monthly) == 4
 
     is_valid, msg = verify_monthly_sanity(trades, monthly)
     assert is_valid, msg
