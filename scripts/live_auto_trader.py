@@ -2,6 +2,9 @@
 """
 Brooks Auto Trader - AUTOMATIC ORDER PLACEMENT
 ⚠️ USE WITH EXTREME CAUTION - ONLY ON DEMO FIRST!
+
+FIXES APPLIED:
+- Added open position check to prevent multiple entries on same signal
 """
 
 import argparse
@@ -31,6 +34,22 @@ from utils.mt5_data import RatesRequest, fetch_rates
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# FIX: Open position check to prevent duplicate entries
+# =============================================================================
+def has_open_positions(mt5_module, symbol: str) -> tuple[bool, int]:
+    """
+    Check if there are any open positions for this symbol.
+
+    Returns:
+        (has_positions: bool, count: int)
+    """
+    positions = mt5_module.positions_get(symbol=symbol)
+    if positions is None:
+        return False, 0
+    return len(positions) > 0, len(positions)
+
+
 def auto_trade_loop(
     strategy_config: StrategyConfig,
     ftmo_config: dict,
@@ -42,13 +61,13 @@ def auto_trade_loop(
     # Initialize MT5
     client = Mt5Client(mt5_module=mt5)
     if not client.initialize():
-        logger.error("❌ MT5 init failed")
+        logger.error("MT5 init failed")
         return
 
     # Get initial equity
     acc_info = mt5.account_info()
     if not acc_info:
-        logger.error("❌ Failed to get account info")
+        logger.error("Failed to get account info")
         client.shutdown()
         return
 
@@ -60,13 +79,13 @@ def auto_trade_loop(
     is_demo = "demo" in acc_server
 
     if not is_demo:
-        logger.error("🚨 LIVE ACCOUNT DETECTED - ABORTING FOR SAFETY!")
+        logger.error("LIVE ACCOUNT DETECTED - ABORTING FOR SAFETY!")
         logger.error(f"   Server: {acc_info.server}")
         logger.error("   This script should ONLY run on demo accounts!")
         client.shutdown()
         return
 
-    logger.info("✅ DEMO account verified: %s", acc_info.server)
+    logger.info("DEMO account verified: %s", acc_info.server)
 
     # Initialize FTMO protection
     if ftmo_config.get("enabled", False):
@@ -82,23 +101,23 @@ def auto_trade_loop(
         )
         ftmo_guardian = FTMOGuardian(rules=rules)
         ftmo_state = FTMOState.initialize(initial_equity, day_tz="America/New_York")
-        logger.info("✅ FTMO Protection: ENABLED")
+        logger.info("FTMO Protection: ENABLED")
     else:
         ftmo_guardian = None
         ftmo_state = None
-        logger.warning("⚠️ FTMO Protection: DISABLED - HIGH RISK!")
+        logger.warning("FTMO Protection: DISABLED - HIGH RISK!")
 
     # Initialize components
     risk_manager = RiskManager()
     spec = client.get_symbol_specification(strategy_config.symbol)
 
     if not spec:
-        logger.error("❌ Failed to get symbol spec for %s", strategy_config.symbol)
+        logger.error("Failed to get symbol spec for %s", strategy_config.symbol)
         client.shutdown()
         return
 
     logger.info("=" * 80)
-    logger.info("🤖 AUTO TRADER STARTED - ORDERS WILL BE PLACED AUTOMATICALLY")
+    logger.info("AUTO TRADER STARTED - ORDERS WILL BE PLACED AUTOMATICALLY")
     logger.info("=" * 80)
     logger.info(f"Account: {acc_info.login} ({acc_info.server})")
     logger.info(f"Balance: ${acc_info.balance:,.2f}")
@@ -107,11 +126,13 @@ def auto_trade_loop(
     logger.info(f"Max trades/day: {strategy_config.guardrails.max_trades_per_day}")
     logger.info(f"Check interval: {check_interval}s")
     logger.info("=" * 80)
-    logger.warning("⚠️ AUTOMATIC ORDER PLACEMENT IS ACTIVE!")
+    logger.warning("AUTOMATIC ORDER PLACEMENT IS ACTIVE!")
     logger.info("=" * 80)
 
     iteration = 0
     last_ftmo_log = time.time()
+    trades_today = 0  # Track trades placed today
+    last_trade_day = None
 
     try:
         while True:
@@ -119,7 +140,7 @@ def auto_trade_loop(
 
             # Emergency stop check
             if os.path.exists("STOP.txt"):
-                logger.error("🛑 EMERGENCY STOP DETECTED - HALTING")
+                logger.error("EMERGENCY STOP DETECTED - HALTING")
                 break
 
             # Update equity
@@ -129,14 +150,15 @@ def auto_trade_loop(
                 running_max_equity = max(running_max_equity, equity_now)
             else:
                 equity_now = running_max_equity
-                logger.warning("⚠️ Could not fetch account info, using cached equity")
+                logger.warning("Could not fetch account info, using cached equity")
 
             # Update FTMO state
             if ftmo_state:
                 now_utc = pd.Timestamp.now(tz="UTC")
                 day_reset = ftmo_state.update(equity_now, now_utc)
                 if day_reset:
-                    logger.info("🔄 New trading day - limits reset")
+                    logger.info("New trading day - limits reset")
+                    trades_today = 0  # Reset daily counter
 
                 # Log FTMO status every 5 minutes
                 if time.time() - last_ftmo_log >= 300:
@@ -144,7 +166,7 @@ def auto_trade_loop(
                     total_pnl = ftmo_state.get_total_pnl(equity_now)
 
                     logger.info("=" * 80)
-                    logger.info("💼 FTMO STATUS")
+                    logger.info("FTMO STATUS")
                     logger.info("=" * 80)
                     logger.info(f"Equity: ${equity_now:,.2f}")
                     logger.info(f"Daily P&L: ${daily_pnl:+,.2f}")
@@ -160,6 +182,25 @@ def auto_trade_loop(
 
             logger.info(f"[Iter {iteration}] Checking for signals...")
 
+            # =================================================================
+            # FIX: Check for open positions FIRST
+            # =================================================================
+            has_pos, pos_count = has_open_positions(mt5, strategy_config.symbol)
+            if has_pos:
+                logger.info(f"[SKIP] {pos_count} position(s) already open - waiting for exit")
+                time.sleep(check_interval)
+                continue
+
+            # =================================================================
+            # FIX: Check daily trade limit
+            # =================================================================
+            if trades_today >= strategy_config.guardrails.max_trades_per_day:
+                logger.info(
+                    f"[SKIP] Daily limit reached ({trades_today}/{strategy_config.guardrails.max_trades_per_day})"
+                )
+                time.sleep(check_interval)
+                continue
+
             # Fetch data
             try:
                 req_m15 = RatesRequest(strategy_config.symbol, mt5.TIMEFRAME_M15, 300)
@@ -168,12 +209,12 @@ def auto_trade_loop(
                 m15_data = fetch_rates(mt5, req_m15)
                 m5_data = fetch_rates(mt5, req_m5)
             except Exception as e:
-                logger.error(f"❌ Data fetch failed: {e}")
+                logger.error(f"Data fetch failed: {e}")
                 time.sleep(check_interval)
                 continue
 
             if m15_data.empty or m5_data.empty:
-                logger.warning("⚠️ Empty data - skipping")
+                logger.warning("Empty data - skipping")
                 time.sleep(check_interval)
                 continue
 
@@ -181,17 +222,17 @@ def auto_trade_loop(
             if strategy_config.regime_filter:
                 ok, reason = should_trade_today(m15_data, strategy_config.regime_params)
                 if not ok:
-                    logger.info(f"⛔ Regime filter: {reason}")
+                    logger.info(f"[SKIP] Regime filter: {reason}")
                     time.sleep(check_interval)
                     continue
-                logger.info(f"✅ Regime: {reason}")
+                logger.info(f"Regime: {reason}")
 
             # Trend detection
             trend, metrics = infer_trend_m15(m15_data, strategy_config.trend_params)
-            logger.info(f"📊 Trend: {trend.value if hasattr(trend, 'value') else str(trend)}")
+            logger.info(f"Trend: {trend.value if hasattr(trend, 'value') else str(trend)}")
 
             if trend not in (Trend.BULL, Trend.BEAR):
-                logger.info("⏸️ No clear trend - waiting")
+                logger.info("[SKIP] No clear trend - waiting")
                 time.sleep(check_interval)
                 continue
 
@@ -207,12 +248,12 @@ def auto_trade_loop(
             )
 
             if not planned:
-                logger.info("⏸️ No setup found")
+                logger.info("[SKIP] No setup found")
                 time.sleep(check_interval)
                 continue
 
             logger.info("=" * 80)
-            logger.info("🎯 SETUP DETECTED!")
+            logger.info("SETUP DETECTED!")
             logger.info("=" * 80)
             logger.info(f"Reason: {planned.reason}")
             logger.info(f"Side: {planned.side.value}")
@@ -222,9 +263,9 @@ def auto_trade_loop(
             logger.info("=" * 80)
 
             # ===================================================
-            # 🚨 EXECUTE TRADE AUTOMATICALLY (ATOMIC + FTMO-SAFE)
+            # EXECUTE TRADE AUTOMATICALLY (ATOMIC + FTMO-SAFE)
             # ===================================================
-            logger.info("🚀 Executing trade...")
+            logger.info("Executing trade...")
 
             result = execute_trade_ftmo_safe(
                 planned_trade=planned,
@@ -239,8 +280,10 @@ def auto_trade_loop(
             )
 
             if result.success:
+                trades_today += 1  # Increment daily counter
+
                 logger.info("=" * 80)
-                logger.info("✅ ✅ ✅ TRADE EXECUTED SUCCESSFULLY ✅ ✅ ✅")
+                logger.info("TRADE EXECUTED SUCCESSFULLY")
                 logger.info("=" * 80)
                 logger.info(f"Ticket: {result.ticket}")
                 logger.info(f"Side: {planned.side.value}")
@@ -249,6 +292,9 @@ def auto_trade_loop(
                 logger.info(f"Target: {planned.tp:.2f}")
                 logger.info(f"Lots: {result.filled_lots:.2f}")
                 logger.info(f"Risk: ${result.actual_risk_usd:.2f}")
+                logger.info(
+                    f"Trades today: {trades_today}/{strategy_config.guardrails.max_trades_per_day}"
+                )
                 logger.info("=" * 80)
 
                 # Increment trading days counter
@@ -257,7 +303,7 @@ def auto_trade_loop(
 
             else:
                 logger.warning("=" * 80)
-                logger.warning("⛔ TRADE BLOCKED")
+                logger.warning("TRADE BLOCKED")
                 logger.warning("=" * 80)
                 logger.warning(f"Reason: {result.reason}")
                 if result.block_stage:
@@ -265,17 +311,17 @@ def auto_trade_loop(
                 logger.warning("=" * 80)
 
             # Wait before next check
-            logger.info(f"💤 Sleeping {check_interval}s until next check...")
+            logger.info(f"Sleeping {check_interval}s until next check...")
             time.sleep(check_interval)
 
     except KeyboardInterrupt:
-        logger.info("⛔ Auto trader stopped by user (Ctrl+C)")
+        logger.info("Auto trader stopped by user (Ctrl+C)")
     except Exception as e:
-        logger.error(f"❌ Auto trader crashed: {e}", exc_info=True)
+        logger.error(f"Auto trader crashed: {e}", exc_info=True)
     finally:
-        logger.info("🔌 Shutting down MT5 connection...")
+        logger.info("Shutting down MT5 connection...")
         client.shutdown()
-        logger.info("✅ Auto trader stopped cleanly")
+        logger.info("Auto trader stopped cleanly")
 
 
 def main() -> int:
@@ -283,7 +329,7 @@ def main() -> int:
         description="Brooks Auto Trader - AUTOMATIC ORDER PLACEMENT",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-⚠️  WARNING: This script places REAL orders automatically!
+WARNING: This script places REAL orders automatically!
 
     ONLY use on DEMO accounts initially!
 
@@ -297,6 +343,9 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    # Create logs directory if needed
+    os.makedirs("logs", exist_ok=True)
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -309,7 +358,7 @@ def main() -> int:
     )
 
     # Load configs
-    logger.info("📋 Loading configuration...")
+    logger.info("Loading configuration...")
     strategy_config = StrategyConfig.load(args.strategy)
 
     with open(args.env, "r") as f:
@@ -318,7 +367,7 @@ def main() -> int:
 
     # Display configuration
     print("\n" + "=" * 80)
-    print("  📋 CONFIGURATION LOADED")
+    print("  CONFIGURATION LOADED")
     print("=" * 80)
     print(f"Strategy: {args.strategy}")
     print(f"Symbol: {strategy_config.symbol}")
@@ -329,15 +378,15 @@ def main() -> int:
     print("=" * 80)
 
     # WARNING prompt
-    print("\n" + "⚠️" * 40)
-    print("  ⚠️  AUTOMATIC ORDER PLACEMENT IS ABOUT TO START  ⚠️")
-    print("⚠️" * 40)
-    print("\n⚠️ ORDERS WILL BE PLACED AUTOMATICALLY WITHOUT CONFIRMATION!")
-    print("⚠️ Ensure you are on a DEMO account!")
-    print("\n🛑 To stop trading, either:")
+    print("\n" + "!" * 80)
+    print("  WARNING: AUTOMATIC ORDER PLACEMENT IS ABOUT TO START")
+    print("!" * 80)
+    print("\nORDERS WILL BE PLACED AUTOMATICALLY WITHOUT CONFIRMATION!")
+    print("Ensure you are on a DEMO account!")
+    print("\nTo stop trading, either:")
     print("   1. Press Ctrl+C")
     print("   2. Create STOP.txt in project root")
-    print("\n⏰ Starting in 10 seconds...")
+    print("\nStarting in 10 seconds...")
     print("   Press Ctrl+C NOW to abort!\n")
 
     try:
@@ -346,10 +395,10 @@ def main() -> int:
             time.sleep(1)
         print(" GO!")
     except KeyboardInterrupt:
-        print("\n\n✅ Aborted by user")
+        print("\n\nAborted by user")
         return 0
 
-    print("\n🚀 Starting auto trader...\n")
+    print("\nStarting auto trader...\n")
 
     auto_trade_loop(strategy_config, ftmo_config, args.interval)
     return 0

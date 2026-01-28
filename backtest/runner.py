@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -62,16 +61,10 @@ def _trend_to_side(trend: Trend) -> Side | None:
     return None
 
 
-def _simulate_trade_outcome(
-    m5_data: pd.DataFrame, t: PlannedTrade
-) -> tuple[float, pd.Timestamp]:
+def _simulate_trade_outcome(m5_data: pd.DataFrame, t: PlannedTrade) -> tuple[float, pd.Timestamp]:
     """Simulate trade with worst-case both-hit policy."""
     future = m5_data.loc[t.execute_ts :]
-    last_ts = (
-        pd.to_datetime(future.index[-1])
-        if len(future)
-        else pd.to_datetime(t.execute_ts)
-    )
+    last_ts = pd.to_datetime(future.index[-1]) if len(future) else pd.to_datetime(t.execute_ts)
 
     for ts, bar in future.iterrows():
         high, low = float(bar["high"]), float(bar["low"])
@@ -104,9 +97,7 @@ def _build_trades_dataframe(
     m5_data: pd.DataFrame,
 ) -> pd.DataFrame:
     rows = []
-    for trade, result, exit_ts in zip(
-        final_trades, results_r, exit_ts_list, strict=True
-    ):
+    for trade, result, exit_ts in zip(final_trades, results_r, exit_ts_list, strict=True):
         entry_ts = pd.to_datetime(trade.execute_ts)
         exit_ts = pd.to_datetime(exit_ts)
 
@@ -142,9 +133,7 @@ def _build_trades_dataframe(
     df = df.sort_values("entry_time").reset_index(drop=True)
 
     if df["exit_time"].dt.tz is None:
-        df["ny_day"] = (
-            df["exit_time"].dt.tz_localize("UTC").dt.tz_convert(NY_TZ).dt.date
-        )
+        df["ny_day"] = df["exit_time"].dt.tz_localize("UTC").dt.tz_convert(NY_TZ).dt.date
     else:
         df["ny_day"] = df["exit_time"].dt.tz_convert(NY_TZ).dt.date
 
@@ -187,11 +176,7 @@ def _compute_metrics(
     if daily_pnl_r.empty:
         return out
 
-    dp = (
-        pd.Series(daily_pnl_r, dtype="float64")
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
-    )
+    dp = pd.Series(daily_pnl_r, dtype="float64").replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     mu = float(dp.mean())
     sig = float(dp.std(ddof=1)) if len(dp) > 1 else 0.0
@@ -253,9 +238,7 @@ def run_backtest_from_config(
     # Determine backtest mode
     if start_date:
         start_dt = pd.Timestamp(start_date, tz="UTC")
-        end_dt = (
-            pd.Timestamp(end_date, tz="UTC") if end_date else pd.Timestamp.now(tz="UTC")
-        )
+        end_dt = pd.Timestamp(end_date, tz="UTC") if end_date else pd.Timestamp.now(tz="UTC")
         cal_days = (end_dt - start_dt).days
         count_m15 = max(cal_days * 90, 10000)
         count_m5 = count_m15 * 3
@@ -294,18 +277,12 @@ def run_backtest_from_config(
 
     # Filter to date range
     if start_dt and end_dt:
-        m15_data = m15_data.loc[
-            max(start_dt, m15_data.index[0]) : min(end_dt, m15_data.index[-1])
-        ]
-        m5_data = m5_data.loc[
-            max(start_dt, m5_data.index[0]) : min(end_dt, m5_data.index[-1])
-        ]
+        m15_data = m15_data.loc[max(start_dt, m15_data.index[0]) : min(end_dt, m15_data.index[-1])]
+        m5_data = m5_data.loc[max(start_dt, m5_data.index[0]) : min(end_dt, m5_data.index[-1])]
 
     period_start = m15_data.index[0] if len(m15_data) else None
     period_end = m15_data.index[-1] if len(m15_data) else None
-    actual_cal_days = (
-        (period_end - period_start).days if period_start and period_end else 0
-    )
+    actual_cal_days = (period_end - period_start).days if period_start and period_end else 0
 
     # Regime & trend detection
     if config.regime_filter:
@@ -347,14 +324,10 @@ def run_backtest_from_config(
         trend_val = m5_data.iloc[i]["trend"]
         side = _trend_to_side(trend_val) if not pd.isna(trend_val) else None
         regime_val = (
-            m5_data.iloc[i].get("regime", MarketRegime.UNKNOWN)
-            if config.regime_filter
-            else None
+            m5_data.iloc[i].get("regime", MarketRegime.UNKNOWN) if config.regime_filter else None
         )
 
-        if side != current_trend or (
-            config.regime_filter and regime_val != current_regime
-        ):
+        if side != current_trend or (config.regime_filter and regime_val != current_regime):
             if current_trend is not None and segment_start < i:
                 segments.append((segment_start, i, current_trend, current_regime))
             current_trend, current_regime, segment_start = side, regime_val, i
@@ -373,9 +346,7 @@ def run_backtest_from_config(
             if t.execute_ts >= m5_data.index[start_idx]:
                 planned_trades.append(t)
 
-    logger.info(
-        f"Planned trades: {len(planned_trades)}, Choppy segments skipped: {skipped_choppy}"
-    )
+    logger.info(f"Planned trades: {len(planned_trades)}, Choppy segments skipped: {skipped_choppy}")
 
     # Guardrails & selection
     in_session, _ = apply_guardrails(
@@ -411,9 +382,7 @@ def run_backtest_from_config(
 
     winrate = float((res > 0).sum() / len(res))
     profit_factor = (
-        float(res[res > 0].sum() / abs(res[res < 0].sum()))
-        if (res < 0).any()
-        else float("inf")
+        float(res[res > 0].sum() / abs(res[res < 0].sum())) if (res < 0).any() else float("inf")
     )
 
     trades_df = _build_trades_dataframe(final_trades, results_r, exit_ts_list, m5_data)
@@ -482,15 +451,11 @@ def run_backtest_from_config(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Brooks Backtest Runner")
-    parser.add_argument(
-        "--config", type=str, required=True, help="Path to strategy YAML"
-    )
+    parser.add_argument("--config", type=str, required=True, help="Path to strategy YAML")
     parser.add_argument("--start-date", type=str, help="Start date YYYY-MM-DD")
     parser.add_argument("--end-date", type=str, help="End date YYYY-MM-DD")
     parser.add_argument("--days", type=int, help="Number of days (legacy)")
-    parser.add_argument(
-        "--max-trades-day", type=int, help="Override max trades per day"
-    )
+    parser.add_argument("--max-trades-day", type=int, help="Override max trades per day")
     parser.add_argument("--dashboard", choices=["v2", "v1", "none"], default="v2")
     parser.add_argument("--initial-capital", type=float, default=10000.0)
 
